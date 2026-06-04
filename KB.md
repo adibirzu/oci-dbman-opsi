@@ -1,0 +1,274 @@
+# dbman-opsi Knowledge Base
+
+This KB captures implementation and live-tenancy troubleshooting notes for OCI Database Management (DBM) and Operations Insights (OPSI). Keep tenant-specific values out of this file: no OCIDs, IP addresses, usernames beyond generic service users, secrets, Bastion session IDs, or private topology.
+
+## 2026-06-04 CAP DBM/OPSI End-To-End Enablement
+
+### OCI CLI database discovery parser failure
+
+- Symptom: `oci db database list` failed with generated CLI parser warnings about duplicated parameters.
+- Scope: Base Database Service discovery.
+- Root cause: The installed OCI CLI generated command shape is unreliable for direct database listing in this environment.
+- Fix: Use OCI Python SDK discovery with the sequence: compartment -> DB system -> DB homes -> databases -> pluggable databases.
+- Validation: SDK discovery found the target DB system, CDB, and PDB while the CLI path failed.
+
+### CDB/PDB orchestration used stale preflight state
+
+- Symptom: A PDB could remain blocked by "parent CDB not enabled" even when the same `configure --apply` run enabled the parent CDB first.
+- Root cause: Decisions were computed from one initial preflight snapshot.
+- Fix: Process ordered targets sequentially and carry forward parent CDB IDs that were enabled or confirmed in the same run.
+- Validation: Added regression coverage for "PDB listed first, CDB enabled first, PDB enabled second."
+
+### DBM enabled does not mean OPSI enabled
+
+- Symptom: `configure --apply` skipped targets when Database Management was already enabled, leaving OPSI Database Insights uncreated.
+- Root cause: The orchestrator treated DBM enabled as complete target success.
+- Fix: If DBM is already enabled but OPSI credential payloads are ready, continue with the OPSI create/enable step.
+- Validation: Added regression coverage for DBM-enabled and OPSI-missing targets.
+
+### OPSI PE co-managed create payload issues
+
+- Symptom: OPSI `create-pe-comanged-database` rejected payloads with `Cannot provide both opsiPrivateEndpointId and dbmPrivateEndpointId`.
+- Root cause: The create path accepts the OPSI private endpoint, not both OPSI and DBM private endpoint IDs.
+- Fix: Send only `--opsi-private-endpoint-id` for `create-pe-comanged-database`.
+- Validation: Unit coverage updated and live command progressed past this validation.
+
+### OPSI database resource type mismatch
+
+- Symptom: OPSI create rejected `ORACLE_DATABASE` as unsupported.
+- Root cause: The OPSI API expects OCI resource type strings, not older guessed labels.
+- Fix: Use `database` for Base Database Service CDB/non-CDB targets and `pluggabledatabase` for PDB targets.
+- Validation: Live command progressed past resource-type validation after config update.
+
+### OPSI `DbcsEntityChangeWorkflowFailed`
+
+- Symptom: OPSI `CREATE_DATABASE_INSIGHT` work request failed after "Starting data collections" with `DbcsEntityChangeWorkflowFailed`; Database Insight list remained empty.
+- Known-good state: DBM managed-database inventory listed both the CDB and PDB as VM/ADVANCED, and DBSNMP was OPEN with required grants in both containers.
+- Likely cause: OPSI could not start collection with the initial credential/source configuration or secret-access scope.
+- Fix path:
+  - Prefer Vault-backed `CREDENTIALS_BY_VAULT` payloads for demos.
+  - Store the DBSNMP password in OCI Vault.
+  - Confirm IAM allows DBM/OPSI principals to read that secret.
+  - Retry OPSI create and inspect work request logs/errors.
+- Validation status: DBM and DB-side grants validated; OPSI retry remains the next live verification step after Vault payload/config update.
+
+### DB-side access through Bastion
+
+- Symptom: Managed SSH Bastion session required a target Compute instance OCID, but the DBCS flow exposed DB node/VNIC metadata.
+- Fix: Use a Bastion port-forwarding session to the DB node private IP on port 22, then SSH to `127.0.0.1:<local-port>` with an authorized key.
+- Operational note: If no local key matches the DB system key, add a temporary public key to the DB system authorized keys while preserving existing keys. Remove it after the demo.
+- Validation: SSH through the Bastion port-forward reached the DB node and allowed SQL*Plus execution as the Oracle OS user.
+
+### DBSNMP password length
+
+- Symptom: Rotating DBSNMP with a long generated quoted password failed with `ORA-00972: identifier is too long`.
+- Root cause: The generated password exceeded what this 19c/profile combination accepted in the SQL statement.
+- Fix: Use a shorter generated password that still satisfies complexity rules. Keep it in ignored local storage and OCI Vault only.
+- Validation: DBSNMP remained OPEN and required grants were visible in CDB root and PDB.
+
+### Network preflight warnings
+
+- Symptom: Subnet was readable, but route table and service gateway reads returned `NotAuthorizedOrNotFound`; security list check did not prove listener ingress.
+- Root cause: Network resources may be in a compartment or policy scope not fully readable by the current principal, or NSGs may be used instead of security lists.
+- Fix: Treat these as warnings when target DBM/DB-side validation succeeds, but verify actual private endpoint/listener connectivity through DBM/OPSI work requests and collection startup.
+
+## Current Demo Validation Checklist
+
+- DB system lifecycle: AVAILABLE.
+- CDB lifecycle: AVAILABLE.
+- PDB lifecycle: AVAILABLE.
+- DBM private endpoint: ACTIVE.
+- OPSI private endpoint: ACTIVE.
+- CDB DBM status: ENABLED.
+- PDB DBM status: ENABLED.
+- DBM managed database inventory: CDB and PDB listed as VM/ADVANCED.
+- DBSNMP: OPEN in CDB root and PDB.
+- Grants: `CREATE SESSION`, `SELECT ANY DICTIONARY`, `SELECT_CATALOG_ROLE`; advanced grants present in the live test.
+- OPSI Database Insight: pending successful create after Vault-backed credential payload is wired into config.
+
+## Repeatable Diagnostic Commands
+
+Use these patterns with local variables. Do not paste raw command output containing OCIDs or IPs into committed files.
+
+```bash
+oci database-management managed-database list \
+  -c "$COMPARTMENT_OCID" \
+  --deployment-type VM \
+  --management-option ADVANCED
+
+oci database-management work-request list \
+  -c "$COMPARTMENT_OCID" \
+  --sort-order DESC
+
+oci opsi database-insights list \
+  -c "$COMPARTMENT_OCID"
+
+oci opsi work-requests list \
+  -c "$COMPARTMENT_OCID" \
+  --sort-order DESC
+```
+
+SQL validation:
+
+```sql
+select username, account_status
+from dba_users
+where username = 'DBSNMP';
+
+select privilege
+from dba_sys_privs
+where grantee = 'DBSNMP'
+  and privilege in ('CREATE SESSION', 'SELECT ANY DICTIONARY', 'ANALYZE ANY', 'ANALYZE ANY DICTIONARY')
+order by privilege;
+
+select granted_role
+from dba_role_privs
+where grantee = 'DBSNMP'
+  and granted_role = 'SELECT_CATALOG_ROLE';
+```
+
+### OPSI CREATE_DATABASE_INSIGHT fails at 80% — DbcsEntityChangeWorkflowFailed
+
+- Symptom: `oci opsi database-insights create-pe-comanged-database` (PE-comanaged DBCS)
+  reaches 80% then FAILED. Work-request error (via REST
+  `GET /20200630/workRequests/{id}/errors`): `Failed to create Database Insight.,
+  Error: DbcsEntityChangeWorkflowFailed`. Work-request logs stop at
+  `Starting data collections` / `Fetch system infrastructure details`.
+  Database Management ADVANCED on the same DB/user/port looks fine, masking the issue.
+- Scope: Base Database Service CDB and PDB, OPSI Database Insight with
+  `CREDENTIALS_BY_VAULT` over an OPSI private endpoint.
+- Why DBM hid it: DBM connects by managed-database OCID and reports lifecycle
+  `ENABLED` even when its data-path auth is broken; only OPSI's create runs an
+  explicit connect-and-collect test, so OPSI is the first place the failure surfaces.
+- Root cause (two independent defects, both fatal to OPSI):
+  1. **Wrong service name.** OPSI `connection-details.serviceName` was set to the
+     bare DB/PDB name (e.g. `DBMOPSI`, `PDB1`). The listener registers no such
+     service — real services are domain-qualified
+     (`<db_unique_name>.<db_domain>` for the CDB root, `<pdb_name>.<db_domain>`
+     for the PDB). Connecting with the bare name returns **ORA-12514**.
+  2. **Credential drift.** The monitoring-user (DBSNMP) password stored in the
+     Vault secret did not match the database. Connecting with the correct service
+     returned **ORA-01017**. The Vault password also violated the DB password
+     verify function (**ORA-20000: password must contain 2 or more special
+     characters**), so it could never have been applied — the secret was written
+     but the `ALTER USER` had silently been rejected at provisioning time.
+- Diagnosis path (no Console needed):
+  - `oci opsi work-requests list` → find FAILED `CREATE_DATABASE_INSIGHT`.
+  - `oci raw-request --http-method GET --target-uri .../workRequests/{id}/errors`
+    and `.../logs` (the `oci opsi work-requests` CLI group has no errors/logs
+    subcommand in 3.81.x).
+  - On the DB host (bastion port-forward to :22 → `sqlplus / as sysdba`):
+    `lsnrctl status` to list real services; test
+    `DBSNMP/<pw>@<db_ip>:1521/<service>` for each candidate to separate
+    ORA-12514 (wrong service) from ORA-01017 (wrong password).
+  - Repeated bad-password probes will lock DBSNMP (**ORA-28000**); unlock with
+    `ALTER USER DBSNMP ACCOUNT UNLOCK CONTAINER=ALL`.
+- Fix:
+  1. Set a policy-compliant DBSNMP password (>=2 special chars, mixed case,
+     digit) and sync it to the Vault secret:
+     `ALTER USER DBSNMP IDENTIFIED BY "<pw>" CONTAINER=ALL;` then
+     `oci vault secret update-base64 --secret-id <id> --secret-content-content <b64>`.
+  2. Correct `service_name` in the config to the real listener service, regenerate
+     the OPSI payloads, then disable+delete the FAILED insights
+     (`disable` first — a FAILED insight cannot be deleted directly:
+     "Database Insight should be disabled before it can be deleted") and re-run
+     `enable --apply`.
+- Validation: new `CREATE_DATABASE_INSIGHT` SUCCEEDED 100%; insight
+  `lifecycle-state ACTIVE`, `database-connection-status-details SUCCESS` for both
+  CDB and PDB.
+
+### enable is not idempotent — DBM 409 aborts before OPSI
+
+- Symptom: `dbman-opsi enable --apply` crashes with
+  `IncorrectState: Either DatabaseManagement is already enabled or request to
+  enable it is already created.` (HTTP 409) and never reaches the Ops Insights
+  step. Hits every re-run once DBM is enabled.
+- Root cause: `EnablementService._enable_cloud_database` called the DBM enable
+  unconditionally and let the runner raise, so a benign already-enabled state
+  killed the whole flow.
+- Fix: `OciCli.run_tolerating(args, tolerated)` swallows errors whose message
+  contains an idempotent marker ("already enabled" / "already created") and
+  re-raises anything else; `_enable_cloud_database` uses it and continues to OPSI.
+
+### validate could not see OPSI collection state (silent OPSI failure)
+
+- Symptom: `dbman-opsi validate` printed
+  "Ops Insights requires Database Insight validation" for every DBCS/Exadata
+  target regardless of the real state, so a fleet of FAILED insights looked the
+  same as healthy ones.
+- Fix: `validate` now calls `OciCli.list_opsi_database_insights` (querying all
+  lifecycle states explicitly, since the list excludes FAILED by default), matches
+  by `database-id == target.resource_id`, and reports the real
+  `lifecycle-state (status)` — e.g. `ACTIVE (ENABLED)`, `FAILED (ENABLED)`,
+  `NOT_FOUND (no Database Insight)`. Retries once on transient
+  NotAuthorizedOrNotFound and degrades to `UNKNOWN (...)` rather than lying.
+- Note: in CAP the OPSI `database-insights list` endpoint intermittently returns
+  NotAuthorizedOrNotFound / empty even when insights exist and are ACTIVE; the
+  authoritative cross-checks are the SUCCEEDED `CREATE_DATABASE_INSIGHT` work
+  request and `database-connection-status-details: SUCCESS` on the insight.
+
+### DBSNMP re-locks after password rotation (ORA-28000 lock loop)
+
+- Symptom: after rotating the DBSNMP password (to fix OPSI/DBM credential drift),
+  DBM monitoring goes green briefly then flips to **Stopped** / red timeline, and
+  OPSI collection stalls ("Needs attention"). Console error:
+  `ORA-28000 - The account is locked` (`DB_Account_Lock`). Account status cycles
+  OPEN -> LOCKED within minutes of being unlocked.
+- Root cause: on Base Database Service the **local Oracle Cloud Agent** monitors
+  the DB as DBSNMP using the password set at provisioning time. Rotating DBSNMP's
+  password without updating that agent leaves a consumer repeatedly authenticating
+  with the old password; it trips the profile's `FAILED_LOGIN_ATTEMPTS` and locks
+  the account, which then knocks out DBM and OPSI (collateral damage) since they
+  share the same DB user.
+- Fix (break the lock loop): put DBSNMP on a dedicated non-locking common profile.
+  ```sql
+  CREATE PROFILE C##DBSNMP_MON LIMIT FAILED_LOGIN_ATTEMPTS UNLIMITED PASSWORD_LIFE_TIME UNLIMITED;
+  ALTER USER DBSNMP PROFILE C##DBSNMP_MON CONTAINER=ALL;   -- common profile needs C## prefix (ORA-65140 otherwise)
+  ALTER USER DBSNMP ACCOUNT UNLOCK CONTAINER=ALL;
+  ```
+  A bare `ACCOUNT UNLOCK` is not enough — the stale agent re-locks it within
+  minutes. With the non-locking profile, the stale consumer's failures no longer
+  lock the account, so DBM (via DBM PE) and OPSI (via OPSI PE) — which use the
+  correct password from the Vault secret — connect and stay connected.
+- Prevention: avoid rotating DBSNMP unless every consumer is updated. If a rotation
+  is unavoidable, assign the non-locking monitoring profile first. DBM monitoring
+  status takes a few minutes to re-poll from UNKNOWN/Stopped back to healthy after
+  the account is fixed.
+- Related: DBM "Credential required ... Advanced diagnostics preferred credential
+  is not set" is a separate item — the managed database's `PC_READ`/`PC_WRITE`
+  preferred credentials are `NOT_SET` (only `MONITORING` is `SET`). Set them with
+  `oci database-management preferred-credential update --type BASIC` (userName
+  DBSNMP, role NORMAL, passwordSecretId <vault-secret>) or via the Console banner;
+  it gates on-demand advanced tasks, not basic collection.
+
+### DBM monitoring stays Stopped after re-enable — stale connection (wrong service name)
+
+- Symptom: Database Management monitoring shows **Stopped** (red timeline, Console
+  `database-status: UNKNOWN/Stopped`) even after the DBSNMP account is unlocked and
+  the Vault password is correct. The DBM "Managed database details" still loads but
+  never collects.
+- Root cause: DBM was first enabled with the wrong `--service-name` (bare
+  `DBMOPSI`/`PDB1`). A later `enable --apply` only **tolerated** the
+  already-enabled 409 and skipped DBM, so the corrected service name (and rotated
+  credential) never reached the DBM connection — it kept resolving a non-existent
+  service (ORA-12514) and could not connect.
+- Fix: reconcile the existing DBM connection in place with the corrected values —
+  no disable/re-enable needed:
+  ```bash
+  oci db database modify-database-management --database-id <cdb> \
+    --management-type ADVANCED --service-name <db_unique_name>.<domain> \
+    --password-secret-id <secret> --private-end-point-id <dbm-pe> \
+    --user-name DBSNMP --role NORMAL --protocol TCP --port 1521 \
+    --wait-for-state AVAILABLE          # NOTE: DB lifecycle state, not work-request SUCCEEDED
+  oci db pluggable-database modify-pluggable-database-management --pluggable-database-id <pdb> \
+    --service-name <pdb>.<domain> --password-secret-id <secret> --private-end-point-id <dbm-pe> \
+    --user-name DBSNMP --role NORMAL --protocol TCP --port 1521 --wait-for-state AVAILABLE
+  ```
+  After the modify, `database-status` flips to `UP` within a minute or two.
+- Code: `enable` now reconciles automatically — on an already-enabled DBM it calls
+  `cloud_modify_command` (modify-(pluggable-)database-management) so a corrected
+  service name / rotated credential actually takes effect on re-run (needed for
+  repeatable ORM/script enablement). `src/dbman_opsi/enablement.py`.
+- Console URL bases (eu-frankfurt-1): DB systems `cloud.oracle.com/dbaas/dbsystems`.
+  (The Database Management / Ops Insights SPA routes are not the obvious
+  `/dbmgmt` or `/opsi`; navigate via the console menu rather than guessing.)

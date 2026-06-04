@@ -1,0 +1,259 @@
+import json
+from pathlib import Path
+
+from dbman_opsi.checks import PreflightReport, fail, ok
+from dbman_opsi.cli import main
+from dbman_opsi.config import EnablementConfig, NetworkSelection, Target, save_config
+from dbman_opsi.orchestrator import ConfigureReport, TargetDecision
+
+
+def test_cli_generate_agent_scripts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "agents"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            targets=(Target(kind="external-db", name="external", external_os="linux"),),
+        ),
+    )
+
+    assert main(["generate-agent-scripts", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "external-agent.sh").exists()
+
+
+def test_cli_provision_render_only(tmp_path: Path) -> None:
+    terraform_dir = tmp_path / "tf"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            terraform_dir=str(terraform_dir),
+        ),
+    )
+
+    assert main(["provision", "--config", str(config_path), "--render-only"]) == 0
+    assert (terraform_dir / "terraform.tfvars.json").exists()
+
+
+def test_cli_generate_db_scripts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "db-scripts"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", monitoring_user="DBSNMP"),),
+        ),
+    )
+
+    assert main(["generate-db-scripts", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "cloud-db" / "02-grant-basic-monitoring.sql").exists()
+
+
+def test_cli_generate_opsi_payloads(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "opsi"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", password_secret_id="secret-id"),),
+        ),
+    )
+
+    assert main(["generate-opsi-payloads", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "cloud-db" / "credential-details.json").exists()
+
+
+def test_cli_prepare_prereqs_dry_run(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            network=NetworkSelection(vcn_id="vcn-id", subnet_id="subnet-id"),
+        ),
+    )
+
+    assert main(["prepare-prereqs", "--config", str(config_path), "--dry-run"]) == 0
+    assert "database-management private-endpoint create" in capsys.readouterr().out
+
+
+def test_cli_accepts_apply_flag_for_prepare_prereqs(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            dry_run=True,
+        ),
+    )
+
+    assert main(["prepare-prereqs", "--config", str(config_path), "--apply"]) == 0
+    assert "Skipping private endpoints" in capsys.readouterr().out
+
+
+def _save_basic_config(config_path: Path) -> None:
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            tenancy_id="tenancy-id",
+            compartment_id="compartment-id",
+            targets=(Target(kind="dbcs", name="cloud db", resource_id="db-id"),),
+        ),
+    )
+
+
+def test_cli_preflight_json_reports_ok(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+
+    class FakePreflight:
+        def __init__(self, oci) -> None:
+            pass
+
+        def run(self, config, db_check=None):
+            return PreflightReport(tenancy_checks=(ok("iam.policies", "present"),))
+
+    monkeypatch.setattr("dbman_opsi.cli.PreflightService", FakePreflight)
+
+    assert main(["preflight", "--config", str(config_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+
+
+def test_cli_preflight_returns_nonzero_when_not_ready(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+
+    class FakePreflight:
+        def __init__(self, oci) -> None:
+            pass
+
+        def run(self, config, db_check=None):
+            return PreflightReport(network_checks=(fail("network.service_gateway", "missing", "create"),))
+
+    monkeypatch.setattr("dbman_opsi.cli.PreflightService", FakePreflight)
+
+    assert main(["preflight", "--config", str(config_path)]) == 1
+
+
+def test_cli_preflight_ingests_db_check_file(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+    spool = tmp_path / "validate.out"
+    spool.write_text("USERNAME ACCOUNT_STATUS\nDBSNMP OPEN\nCREATE SESSION\nSELECT ANY DICTIONARY\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakePreflight:
+        def __init__(self, oci) -> None:
+            pass
+
+        def run(self, config, db_check=None):
+            captured["db_check"] = db_check
+            return PreflightReport(tenancy_checks=(ok("iam.policies", "present"),))
+
+    monkeypatch.setattr("dbman_opsi.cli.PreflightService", FakePreflight)
+
+    assert main(["preflight", "--config", str(config_path), "--db-check-file", str(spool)]) == 0
+    assert captured["db_check"] is not None
+    assert captured["db_check"].ok  # type: ignore[union-attr]
+
+
+def test_cli_configure_db_side_only_uses_handoff_mode(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+    captured: dict[str, object] = {}
+
+    class FakeConfigure:
+        def __init__(self, oci, enablement=None) -> None:
+            pass
+
+        def configure(self, config, mode="plan", handoff_dir="x", force=False):
+            captured["mode"] = mode
+            return ConfigureReport(
+                mode=mode,
+                preflight=PreflightReport(),
+                decisions=(TargetDecision("cloud db", "dbcs", "oci-native", "handoff", "packet"),),
+            )
+
+    monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
+
+    assert main(["configure", "--config", str(config_path), "--db-side-only"]) == 0
+    assert captured["mode"] == "db-side-only"
+    assert "[HANDOFF] cloud db" in capsys.readouterr().out
+
+
+def test_cli_import_tf_outputs_merges_and_writes(tmp_path: Path, monkeypatch) -> None:
+    from dbman_opsi.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            network=NetworkSelection(create_test_network=True),
+            targets=(Target(kind="dbcs", name="cloud db", resource_id="db-id"),),
+        ),
+    )
+
+    monkeypatch.setattr(
+        "dbman_opsi.cli.read_terraform_outputs",
+        lambda terraform_dir, runner: {
+            "subnet_ocid": {"value": "subnet-from-tf"},
+            "db_management_private_endpoint_ocid": {"value": "pe-from-tf"},
+        },
+    )
+
+    assert main(["import-tf-outputs", "--config", str(config_path)]) == 0
+    reloaded = load_config(config_path)
+    assert reloaded.network.subnet_id == "subnet-from-tf"
+    assert reloaded.targets[0].private_endpoint_id == "pe-from-tf"
+
+
+def test_cli_import_tf_outputs_dry_run_does_not_write(tmp_path: Path, monkeypatch, capsys) -> None:
+    from dbman_opsi.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    save_config(config_path, EnablementConfig(profile="DEFAULT", region="eu-frankfurt-1",
+                                              network=NetworkSelection(create_test_network=True)))
+    monkeypatch.setattr("dbman_opsi.cli.read_terraform_outputs",
+                        lambda terraform_dir, runner: {"subnet_ocid": {"value": "subnet-from-tf"}})
+
+    assert main(["import-tf-outputs", "--config", str(config_path), "--dry-run"]) == 0
+    assert "Dry run" in capsys.readouterr().out
+    assert load_config(config_path).network.subnet_id is None
+
+
+def test_cli_configure_blocked_returns_nonzero(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+
+    class FakeConfigure:
+        def __init__(self, oci, enablement=None) -> None:
+            pass
+
+        def configure(self, config, mode="plan", handoff_dir="x", force=False):
+            return ConfigureReport(
+                mode=mode,
+                preflight=PreflightReport(),
+                decisions=(TargetDecision("cloud db", "dbcs", "oci-native", "blocked", "no SGW"),),
+            )
+
+    monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
+
+    assert main(["configure", "--config", str(config_path)]) == 1
