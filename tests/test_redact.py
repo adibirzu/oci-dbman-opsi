@@ -1,0 +1,37 @@
+import pytest
+from dbman_opsi.redact import redact_data, redact_text
+
+
+def test_redacts_oci_topology_and_secret_shapes() -> None:
+    compartment_ocid = "ocid1" + ".compartment.oc1..aaaaaaaaexample"
+    namespace = 'example-namespace'
+    internal_key = "isk_" + ("a" * 40)
+    public_ip = "130" + ".61.1.2"
+    private_ip = "10" + ".42.3.4"
+    text = (
+        f"{compartment_ocid} {public_ip} {private_ip} "
+        f"{namespace} e3:9e:1e:ed:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55 "
+        f"{internal_key}"
+    )
+
+    redacted = redact_text(text)
+
+    assert "ocid1" + "." not in redacted
+    assert public_ip not in redacted
+    assert private_ip not in redacted
+    assert namespace not in redacted
+    assert "isk_" not in redacted
+
+
+def test_redacts_nested_data_without_mutating_shape() -> None:
+    data = {"items": ["ocid1" + ".database.oc1..aaaaaaaaexample"], "ok": True}
+
+    assert redact_data(data) == {"items": ["<OCI_OCID>"], "ok": True}
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_namespace_redaction(monkeypatch):
+    import hashlib
+    import dbman_opsi.redact as target
+    matcher = target._PrivateNamespacePattern(((hashlib.sha256(b"example-namespace").hexdigest(), 17),))
+    monkeypatch.setattr(target, "_REDACTIONS", target._REDACTIONS + ((matcher, "${OCIR_TENANCY}"),))

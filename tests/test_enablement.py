@@ -1,0 +1,297 @@
+from dbman_opsi.config import Target
+from dbman_opsi.enablement import EnablementService
+
+
+class FakeOci:
+    def __init__(self, fail_on_index: int | None = None, fail_text: str = "", insights=None) -> None:
+        self.commands: list[list[str]] = []
+        self.fail_on_index = fail_on_index
+        self.fail_text = fail_text
+        self.insights = insights or []
+
+    def list_opsi_database_insights(self, compartment_id):
+        return self.insights
+
+    def run(self, args: list[str]) -> None:
+        index = len(self.commands)
+        self.commands.append(args)
+        if self.fail_on_index is not None and index == self.fail_on_index:
+            raise RuntimeError(self.fail_text)
+
+    def run_tolerating(self, args: list[str], tolerated: tuple[str, ...]) -> bool:
+        try:
+            self.run(args)
+            return True
+        except RuntimeError as exc:
+            if any(marker in str(exc) for marker in tolerated):
+                return False
+            raise
+
+
+def test_enable_cloud_database_requires_connection_fields() -> None:
+    service = EnablementService(FakeOci())  # type: ignore[arg-type]
+    target = Target(kind="dbcs", name="db1", resource_id="database-id")
+
+    try:
+        service.enable_target(target)
+    except ValueError as exc:
+        assert "password_secret_id" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_enable_autonomous_invokes_opsi_command() -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(kind="autonomous", name="adb", resource_id="autonomous-database-id")
+
+    service.enable_target(target)
+
+    assert oci.commands[0][:3] == ["db", "autonomous-database", "enable-autonomous-database-management"]
+
+
+def test_enable_autonomous_invokes_database_management_when_configured() -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="autonomous",
+        name="adb",
+        resource_id="autonomous-database-id",
+        opsi_database_insight_id="database-insight-id",
+    )
+
+    service.enable_target(target)
+
+    assert len(oci.commands) == 2
+    assert oci.commands[1][:3] == ["opsi", "database-insights", "enable-autonomous-database"]
+
+
+def test_enable_cloud_database_invokes_dbmgmt_and_opsi_commands() -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_database_insight_id="database-insight-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    assert oci.commands[0][:3] == ["db", "database", "enable-database-management"]
+    assert "--private-end-point-id" in oci.commands[0]
+    assert oci.commands[1][:3] == ["opsi", "database-insights", "enable-pe-comanaged-database"]
+    assert "file://credential-details.json" in oci.commands[1]
+
+
+def test_enable_cloud_database_creates_opsi_insight_when_missing_id() -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    assert oci.commands[1][:3] == ["opsi", "database-insights", "create-pe-comanged-database"]
+    assert "--database-id" in oci.commands[1]
+    assert "--opsi-private-endpoint-id" in oci.commands[1]
+    assert "--dbm-private-endpoint-id" not in oci.commands[1]
+    assert "--database-resource-type" in oci.commands[1]
+    assert "--wait-for-state" in oci.commands[1]
+    assert "SUCCEEDED" in oci.commands[1]
+    assert "file://credential-details.json" in oci.commands[1]
+
+
+def test_enable_cloud_database_tolerates_dbm_already_enabled(capsys) -> None:
+    # Database Management enable returns 409 "already enabled"; the run must
+    # swallow it and still issue the Ops Insights create (idempotent re-run).
+    oci = FakeOci(
+        fail_on_index=0,
+        fail_text=(
+            "Command failed (1): ... IncorrectState ... "
+            "Either DatabaseManagement is already enabled or request to enable it is already created."
+        ),
+    )
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    # already-enabled DBM -> reconcile via modify, then still create the OPSI insight
+    assert oci.commands[0][:3] == ["db", "database", "enable-database-management"]
+    assert oci.commands[1][:3] == ["db", "database", "modify-database-management"]
+    assert "--service-name" in oci.commands[1]
+    assert oci.commands[2][:3] == ["opsi", "database-insights", "create-pe-comanged-database"]
+    assert "already enabled" in capsys.readouterr().out
+
+
+def test_reconcile_pdb_uses_pluggable_modify_verb() -> None:
+    oci = FakeOci(
+        fail_on_index=0,
+        fail_text="IncorrectState: Either DatabaseManagement is already enabled or request to enable it is already created.",
+    )
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="pdb1",
+        resource_id="pluggable-database-id",
+        database_role="PDB",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="pdb1.example.com",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    assert oci.commands[1][:3] == ["db", "pluggable-database", "modify-pluggable-database-management"]
+    assert "--pluggable-database-id" in oci.commands[1]
+    assert "--management-type" not in oci.commands[1]
+    assert "pdb1.example.com" in oci.commands[1]
+
+
+def test_enable_cloud_database_reraises_untolerated_error() -> None:
+    oci = FakeOci(fail_on_index=0, fail_text="ServiceError: LimitExceeded quota reached")
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    try:
+        service.enable_target(target)
+    except RuntimeError as exc:
+        assert "LimitExceeded" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError to propagate")
+
+
+def test_enable_skips_opsi_create_when_insight_already_active(capsys) -> None:
+    oci = FakeOci(insights=[{"database-id": "database-id", "lifecycle-state": "ACTIVE"}])
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    # DBM enable runs; OPSI create is skipped because an ACTIVE insight exists.
+    assert oci.commands[0][:3] == ["db", "database", "enable-database-management"]
+    assert not any("create-pe-comanged-database" in c for c in oci.commands)
+    assert "already ACTIVE" in capsys.readouterr().out
+
+
+def test_enable_cloud_database_skips_opsi_when_payloads_missing(capsys) -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+    )
+
+    service.enable_target(target)
+
+    assert len(oci.commands) == 1
+    assert "Skipping Ops Insights" in capsys.readouterr().out
+
+
+def test_enable_pdb_uses_pluggable_verb_without_management_type() -> None:
+    oci = FakeOci()
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="pdb1",
+        resource_id="pluggable-database-id",
+        database_role="PDB",
+        parent_cdb_id="cdb-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="private-endpoint-id",
+        service_name="PDB1",
+        monitoring_user="DBSNMP",
+    )
+
+    service.enable_target(target)
+
+    command = oci.commands[0]
+    assert command[:3] == ["db", "pluggable-database", "enable-pluggable-database-management"]
+    assert "--pluggable-database-id" in command
+    assert "pluggable-database-id" not in [c for c in command if c == "--database-id"]
+    assert "--management-type" not in command
+
+
+def test_enable_external_prints_next_step(capsys) -> None:
+    service = EnablementService(FakeOci())  # type: ignore[arg-type]
+
+    service.enable_target(Target(kind="external-db", name="external"))
+
+    assert "run generated Management Agent script" in capsys.readouterr().out
+
+
+def test_enable_rejects_unknown_target_kind() -> None:
+    service = EnablementService(FakeOci())  # type: ignore[arg-type]
+
+    try:
+        service.enable_target(Target(kind="bad", name="bad"))  # type: ignore[arg-type]
+    except ValueError as exc:
+        assert "Unsupported" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
