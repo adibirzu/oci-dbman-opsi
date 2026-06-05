@@ -8,10 +8,33 @@ import os
 from dbman_opsi.config import EnablementConfig
 from dbman_opsi.oci_cli import OciCli
 
+# A list-first idempotency check can miss an existing resource when the OCI
+# control plane returns a flaky empty/partial list (the same non-determinism that
+# bites OPSI reads). So creates also tolerate the server-side name conflict: if the
+# resource really exists, the 409 is an idempotent no-op rather than a crash.
+_CREATE_CONFLICT_MARKERS = (
+    "already exists",
+    "already in use",
+    "already used",
+    "AlreadyExists",
+    "name is already",
+)
+
 
 class PrerequisiteService:
     def __init__(self, oci: OciCli) -> None:
         self.oci = oci
+
+    def _create_tolerant(self, args: list[str], what: str) -> None:
+        """Run a create, absorbing an 'already exists' conflict as a no-op.
+
+        Belt-and-suspenders to the list-first guard above each call site: if that
+        list flaked empty and missed the existing resource, the create's name
+        conflict is tolerated instead of aborting the whole prepare run.
+        """
+
+        if not self.oci.run_tolerating(args, tolerated=_CREATE_CONFLICT_MARKERS):
+            print(f"{what} already exists (create returned a name conflict); treated as a no-op.")
 
     def prepare(self, config: EnablementConfig, password_env: str | None = None) -> None:
         if config.network.subnet_id:
@@ -29,7 +52,7 @@ class PrerequisiteService:
         if any(item.get("name") == "dbman_opsi_dbmgmt_pe" for item in existing):
             print("Database Management private endpoint dbman_opsi_dbmgmt_pe already exists; skipping create.")
             return
-        self.oci.run([
+        self._create_tolerant([
             "database-management",
             "private-endpoint",
             "create",
@@ -45,14 +68,14 @@ class PrerequisiteService:
             "false",
             "--description",
             "Created by dbman-opsi for Database Management enablement.",
-        ])
+        ], "Database Management private endpoint dbman_opsi_dbmgmt_pe")
 
     def _create_opsi_private_endpoint(self, config: EnablementConfig) -> None:
         existing = self.oci.list_opsi_private_endpoints(config.compartment_id or "")
         if any(item.get("display-name") == "dbman_opsi_opsi_pe" for item in existing):
             print("Ops Insights private endpoint dbman_opsi_opsi_pe already exists; skipping create.")
             return
-        self.oci.run([
+        self._create_tolerant([
             "opsi",
             "opsi-private-endpoint",
             "create",
@@ -68,7 +91,7 @@ class PrerequisiteService:
             "false",
             "--description",
             "Created by dbman-opsi for Ops Insights enablement.",
-        ])
+        ], "Ops Insights private endpoint dbman_opsi_opsi_pe")
 
     def _create_password_secrets(self, config: EnablementConfig, password_env: str) -> None:
         if not config.vault.vault_id or not config.vault.key_id:
@@ -84,7 +107,8 @@ class PrerequisiteService:
                 continue
             if target.kind not in {"dbcs", "exadata", "external-db", "external-exadata"}:
                 continue
-            self.oci.run([
+            secret_name = f"dbman-opsi-{target.name.replace(' ', '-').lower()}-password"
+            self._create_tolerant([
                 "vault",
                 "secret",
                 "create-base64",
@@ -95,9 +119,9 @@ class PrerequisiteService:
                 "--key-id",
                 config.vault.key_id,
                 "--secret-name",
-                f"dbman-opsi-{target.name.replace(' ', '-').lower()}-password",
+                secret_name,
                 "--secret-content-content",
                 encoded,
                 "--description",
                 "Database monitoring user password for dbman-opsi.",
-            ])
+            ], f"Vault secret {secret_name}")
