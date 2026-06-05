@@ -173,3 +173,17 @@ output "provisioned_dbcs_ids" {
 output "provisioned_autonomous_database_ids" {
   value = { for name, database in oci_database_autonomous_database.adb : name => database.id }
 }
+
+# Optional DBM + OPSI enablement (modular, off by default). service_name/host_ip
+# are runtime-discovered, so populate var.observability_targets after the DB is up.
+module "observability" {
+  count  = var.enable_observability ? 1 : 0
+  source = "../../modules/dbm-opsi-enablement"
+
+  compartment_id           = var.compartment_ocid
+  dbm_private_endpoint_id  = oci_database_management_db_management_private_endpoint.dbmgmt.id
+  opsi_private_endpoint_id = var.opsi_private_endpoint_id
+  password_secret_id       = var.dbsnmp_secret_id
+  enable_ops_insights      = var.opsi_private_endpoint_id != null
+  targets                  = var.observability_targets
+}

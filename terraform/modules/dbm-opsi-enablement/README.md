@@ -33,14 +33,14 @@ module "observability" {
     cdb = {
       database_id            = var.cdb_ocid
       database_role          = "CDB"
-      database_resource_type = "DATABASE"
+      database_resource_type = "database"
       service_name           = "<db_unique_name>.<db_domain>" # REAL listener service, not the bare DB name
       host_ip                = var.db_node_private_ip
     }
     pdb1 = {
       database_id            = var.pdb_ocid
       database_role          = "PDB"
-      database_resource_type = "PLUGGABLE_DATABASE"
+      database_resource_type = "pluggabledatabase"
       service_name           = "<pdb_name>.<db_domain>"
       host_ip                = var.db_node_private_ip
     }

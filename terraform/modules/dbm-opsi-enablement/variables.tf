@@ -53,7 +53,7 @@ variable "targets" {
   type = map(object({
     database_id            = string
     database_role          = string # CDB | PDB | NON_CDB
-    database_resource_type = string # DATABASE | PLUGGABLE_DATABASE
+    database_resource_type = string # OPSI value, lowercase: "database" | "pluggabledatabase"
     service_name           = string
     host_ip                = string
     management_type        = optional(string, "ADVANCED")

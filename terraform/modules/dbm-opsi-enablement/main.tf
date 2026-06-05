@@ -126,5 +126,11 @@ resource "oci_opsi_database_insight" "insight" {
     }
   }
 
+  lifecycle {
+    # deployment_type is accepted on create but not returned by the API, so
+    # without this TF would perpetually try to re-set it and force replacement.
+    ignore_changes = [deployment_type]
+  }
+
   depends_on = [oci_database_management_database_dbm_features_management.dbm]
 }
