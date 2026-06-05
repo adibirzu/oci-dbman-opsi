@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not set DBM advanced-diagnostics preferred credentials after enabling",
     )
+    enable.add_argument(
+        "--force-reconcile",
+        action="store_true",
+        help="Always reconcile the DBM connection, even when monitoring is already healthy",
+    )
 
     prereqs = subcommands.add_parser("prepare-prereqs", help="Create OCI-side prerequisites such as private endpoints and optional Vault secrets")
     _add_config_args(prereqs)
@@ -154,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "enable":
         config = load_config(args.config)
         runner = CommandRunner(dry_run=not args.apply and (args.dry_run or config.dry_run))
-        EnablementService(OciCli(config.profile, config.region, runner)).enable_all(config)
+        EnablementService(OciCli(config.profile, config.region, runner)).enable_all(
+            config, force_reconcile=args.force_reconcile
+        )
         if args.apply and not args.skip_credentials:
             # Complete the workflow: set the DBM advanced-diagnostics preferred
             # credentials (live + idempotent). Best-effort — blocked targets are

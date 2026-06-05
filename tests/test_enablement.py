@@ -3,14 +3,19 @@ from dbman_opsi.enablement import EnablementService
 
 
 class FakeOci:
-    def __init__(self, fail_on_index: int | None = None, fail_text: str = "", insights=None) -> None:
+    def __init__(self, fail_on_index: int | None = None, fail_text: str = "", insights=None,
+                 db_status: str = "DOWN") -> None:
         self.commands: list[list[str]] = []
         self.fail_on_index = fail_on_index
         self.fail_text = fail_text
         self.insights = insights or []
+        self.db_status = db_status
 
     def list_opsi_database_insights(self, compartment_id):
         return self.insights
+
+    def get_managed_database_status(self, managed_database_id):
+        return self.db_status
 
     def run(self, args: list[str]) -> None:
         index = len(self.commands)
@@ -154,6 +159,54 @@ def test_enable_cloud_database_tolerates_dbm_already_enabled(capsys) -> None:
     assert "--service-name" in oci.commands[1]
     assert oci.commands[2][:3] == ["opsi", "database-insights", "create-pe-comanged-database"]
     assert "already enabled" in capsys.readouterr().out
+
+
+def _already_enabled_cdb_oci(db_status: str) -> FakeOci:
+    return FakeOci(
+        fail_on_index=0,
+        fail_text="IncorrectState: Either DatabaseManagement is already enabled or request to enable it is already created.",
+        insights=[{"database-id": "database-id", "lifecycle-state": "ACTIVE"}],  # skip OPSI create noise
+        db_status=db_status,
+    )
+
+
+def _cdb_already_enabled_target() -> Target:
+    return Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+
+def test_enable_skips_reconcile_when_monitoring_healthy(capsys) -> None:
+    oci = _already_enabled_cdb_oci(db_status="UP")
+    EnablementService(oci).enable_target(_cdb_already_enabled_target())  # type: ignore[arg-type]
+
+    # DBM already enabled + healthy -> no modify reconcile.
+    assert not any("modify-database-management" in c for c in oci.commands)
+    assert "skipping reconcile" in capsys.readouterr().out
+
+
+def test_enable_reconciles_when_monitoring_not_healthy(capsys) -> None:
+    oci = _already_enabled_cdb_oci(db_status="DOWN")
+    EnablementService(oci).enable_target(_cdb_already_enabled_target())  # type: ignore[arg-type]
+
+    assert any("modify-database-management" in c for c in oci.commands)
+
+
+def test_enable_force_reconcile_modifies_even_when_healthy() -> None:
+    oci = _already_enabled_cdb_oci(db_status="UP")
+    EnablementService(oci).enable_target(_cdb_already_enabled_target(), force_reconcile=True)  # type: ignore[arg-type]
+
+    assert any("modify-database-management" in c for c in oci.commands)
 
 
 def test_reconcile_pdb_uses_pluggable_modify_verb() -> None:
