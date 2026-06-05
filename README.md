@@ -88,8 +88,25 @@ For your public fork, update the button URL to your repository archive URL.
 - `generate-opsi-payloads`: create Operations Insights JSON payload templates.
 - `preflight`: read-only check of every prerequisite (IAM, Service Gateway, route, private endpoints, Vault secret, monitoring user, Management Agent). Supports `--json` and `--db-check-file` (spooled `04-validate-monitoring-user.sql` output) to verify the DB monitoring user instead of leaving it manual.
 - `configure`: orchestrated detect → branch-by-location → gate → act flow. `--apply` enables, `--db-side-only` emits DBA handoff packets, `--force` overrides blockers, `--json` for automation.
-- `enable`: run OCI Database Management and Operations Insights enablement.
-- `validate`: check service state and collection readiness.
+- `enable`: run OCI Database Management and Operations Insights enablement. Idempotent and self-healing — re-runs tolerate an already-enabled DBM (409) and **reconcile** the connection (so a corrected service name or rotated credential takes effect), skip already-ACTIVE OPSI insights, and (in `--apply`) set the advanced-diagnostics preferred credentials. Use `--skip-credentials` to opt out of the last step.
+- `set-credentials`: set the DBM advanced-diagnostics preferred credentials (`PC_READ`/`PC_WRITE`) via a Vault-backed named credential, so on-demand tasks (Performance Hub, AWR, ADDM, SQL Tuning) work. Idempotent; retries the flaky `dbmgmt` control plane and reports blocked targets with remediation.
+- `validate`: check service state and collection readiness. Reports the real OPSI Database Insight lifecycle (`ACTIVE`/`FAILED`/`NOT_FOUND`/`UNKNOWN`) per target rather than a generic message.
+
+## End-to-end enablement, Terraform & troubleshooting
+
+- **Reproducible runbook:** [docs/RUNBOOK-e2e-cap.md](docs/RUNBOOK-e2e-cap.md) walks the full
+  Phase 0→5 flow (confirm infra → doctor/preflight → DB-side proof → generate →
+  enable + validate → Console showcase), with the five defects found and fixed
+  running it live.
+- **Troubleshooting KB:** [KB.md](KB.md) maps live-tenancy failure signatures to
+  root cause + fix (OPSI insight 80% failure, DBM idempotency, DBSNMP lock loop,
+  DBM stale-service reconcile, validate blindness). On any error, the CLI also
+  prints a *Solution* + *Manual step* from the same remediation map.
+- **Declarative / ORM path:** [terraform/modules/dbm-opsi-enablement](terraform/modules/dbm-opsi-enablement)
+  is a feature-toggled, `for_each`-driven module (DBM features management, named
+  credential, OPSI insight, plus a CLI step for preferred credentials). Pure
+  Terraform for teams that prefer Resource Manager over the CLI. `terraform
+  validate` passes; apply-test in a scratch tenancy before production.
 
 ## Security
 
