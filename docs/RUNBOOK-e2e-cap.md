@@ -127,13 +127,15 @@ and reports `ACTIVE (ENABLED)` / `FAILED (ENABLED)` / `NOT_FOUND` / `UNKNOWN`,
 with a retry on transient 404. (`src/dbman_opsi/validation.py`; tests in
 `tests/test_validation.py`.)
 
-## Known cap quirk
+## Known cap quirk (root-caused in Defect 6)
 
-The OPSI `database-insights list` control-plane endpoint intermittently returns
-`NotAuthorizedOrNotFound` (or exit-0-empty) even when insights exist and are
-ACTIVE. Authoritative cross-checks that don't depend on it: the SUCCEEDED
-`CREATE_DATABASE_INSIGHT` work request, and `database-connection-status-details:
-SUCCESS` on the insight.
+The OPSI `database-insights list` control-plane endpoint is **non-deterministic**:
+it flaps between the full set, a partial set, and an exit-0 empty list (and
+sometimes `NotAuthorizedOrNotFound`) for the same compartment, call to call — the
+multi-`--lifecycle-state` + `--all` query shape makes it worse. Authoritative reads
+that don't depend on it: a single-resource `database-insights get` **by insight
+OCID** (reliable 10/10), the SUCCEEDED `CREATE_DATABASE_INSIGHT` work request, and
+`database-connection-status-details: SUCCESS` on the insight. See Defect 6.
 
 ## Defect 4 — DBM monitoring stays Stopped after re-enable (stale service name)
 
@@ -152,10 +154,34 @@ re-locked the account (ORA-28000), taking DBM + OPSI down. Fixed by moving DBSNM
 to a non-locking common profile `C##DBSNMP_MON`
 (FAILED_LOGIN_ATTEMPTS/PASSWORD_LIFE_TIME UNLIMITED).
 
+## Defect 6 — `validate` false `NOT_FOUND` from the flaky OPSI list (code fix)
+
+Re-running the full e2e (2026-06-05) surfaced that `validate` (Defect 3's
+list-based path) reported `Ops Insights NOT_FOUND` for the CDB and PDB while both
+insights were `ACTIVE / SUCCESS`. Root cause: the aggregated `database-insights
+list` flaps (0/2/7 items call-to-call), worsened by the 5-`--lifecycle-state` +
+`--all` shape; `validate` matched the target against one flaky response. Fix:
+
+- `OciCli.list_opsi_database_insights` now queries **one lifecycle state per call
+  and unions** by insight OCID (each call fault-tolerant) instead of the broken
+  single multi-state call.
+- New `OciCli.get_opsi_database_insight(insight_id)`; `validate` prefers this
+  **reliable GET by insight OCID** (`target.opsi_database_insight_id`, now persisted
+  in config), falling back to the list only to discover an unknown OCID.
+- List-fallback verdict model never emits a false `NOT_FOUND`: positive hit is
+  authoritative (then GET); `NOT_FOUND` only on a stable non-empty list reproducibly
+  missing the target; empty/varying → `UNKNOWN`.
+- (`src/dbman_opsi/oci_cli.py`, `src/dbman_opsi/validation.py`; tests in
+  `tests/test_oci_cli.py`, `tests/test_validation.py`.) After the fix `validate`
+  reports `ACTIVE (ENABLED)` for both targets deterministically. Full KB entry:
+  `KB.md` → "2026-06-05 OPSI list flap".
+
 ## Final verified state (API)
 
 - DBM: CDB `DBMOPSI` **UP**, PDB `PDB1` **UP** (ADVANCED).
 - OPSI: DBMOPSI + PDB1 **ACTIVE**, `database-connection-status-details: SUCCESS`.
+- `validate` reports `Ops Insights ACTIVE (ENABLED)` for both, deterministically
+  (via GET-by-OCID), across repeated runs.
 
 ## Phase 5 — OCI Console screenshots
 

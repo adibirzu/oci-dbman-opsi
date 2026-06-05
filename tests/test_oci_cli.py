@@ -71,3 +71,70 @@ def test_oci_cli_list_methods_use_expected_verbs() -> None:
     assert oci.list_policies("compartment-id") == []
     assert runner.commands[0][5:8] == ["network", "service-gateway", "list"]
     assert runner.commands[1][5:8] == ["iam", "policy", "list"]
+
+
+class _StateRunner:
+    """Returns a per-lifecycle-state payload; optionally fails on one state.
+
+    Models the OPSI list facade querying one state per call: the multi-state +
+    --all combination flaps on the live control plane, so the facade unions
+    single-state calls instead.
+    """
+
+    def __init__(self, by_state, fail_state=None):
+        self.by_state = by_state
+        self.fail_state = fail_state
+        self.commands = []
+
+    def run(self, args, cwd=None, check=True):
+        self.commands.append(args)
+        state = args[args.index("--lifecycle-state") + 1]
+        if state == self.fail_state:
+            raise RuntimeError("NotAuthorizedOrNotFound")
+        return CommandResult(tuple(args), self.by_state.get(state, '{"data": []}'), "", 0)
+
+
+def test_list_opsi_insights_queries_each_state_and_unions_by_id() -> None:
+    runner = _StateRunner({
+        "ACTIVE": '{"data": [{"id": "ins-1", "database-id": "db-a", "lifecycle-state": "ACTIVE"}]}',
+        "FAILED": '{"data": [{"id": "ins-2", "database-id": "db-b", "lifecycle-state": "FAILED"}]}',
+        # ins-1 reappears under another state filter; the union must dedup by OCID.
+        "NEEDS_ATTENTION": '{"data": [{"id": "ins-1", "database-id": "db-a", "lifecycle-state": "ACTIVE"}]}',
+    })
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    insights = oci.list_opsi_database_insights("compartment-id")
+
+    ids = sorted(i["id"] for i in insights)
+    assert ids == ["ins-1", "ins-2"]
+    # One call per lifecycle state, each carrying exactly one --lifecycle-state.
+    assert len(runner.commands) == len(OciCli.OPSI_INSIGHT_STATES)
+    assert all(cmd.count("--lifecycle-state") == 1 for cmd in runner.commands)
+
+
+def test_list_opsi_insights_tolerates_a_failing_state_call() -> None:
+    # A transient failure on one state must not discard the insights gathered
+    # from the others (never a false "no insights")...
+    runner = _StateRunner(
+        {"FAILED": '{"data": [{"id": "ins-2", "database-id": "db-b", "lifecycle-state": "FAILED"}]}'},
+        fail_state="ACTIVE",
+    )
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    insights, complete = oci.list_opsi_database_insights_complete("compartment-id")
+
+    assert [i["id"] for i in insights] == ["ins-2"]
+    # ...but the union is flagged incomplete so callers don't trust it for absence.
+    assert complete is False
+
+
+def test_list_opsi_insights_complete_flag_true_when_all_states_answer() -> None:
+    runner = _StateRunner({
+        "ACTIVE": '{"data": [{"id": "ins-1", "database-id": "db-a", "lifecycle-state": "ACTIVE"}]}',
+    })
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    insights, complete = oci.list_opsi_database_insights_complete("compartment-id")
+
+    assert [i["id"] for i in insights] == ["ins-1"]
+    assert complete is True
