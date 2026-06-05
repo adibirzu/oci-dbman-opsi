@@ -100,16 +100,16 @@ class EnablementService:
     def __init__(self, oci: OciCli) -> None:
         self.oci = oci
 
-    def enable_all(self, config: EnablementConfig) -> None:
+    def enable_all(self, config: EnablementConfig, force_reconcile: bool = False) -> None:
         for target in config.targets:
-            self.enable_target(target)
+            self.enable_target(target, force_reconcile=force_reconcile)
 
-    def enable_target(self, target: Target) -> None:
+    def enable_target(self, target: Target, force_reconcile: bool = False) -> None:
         if target.kind == "autonomous":
             self._enable_autonomous(target)
             return
         if target.kind in {"dbcs", "exadata"}:
-            self._enable_cloud_database(target)
+            self._enable_cloud_database(target, force_reconcile=force_reconcile)
             return
         if target.kind in {"external-db", "external-exadata"}:
             self._print_external_next_step(target)
@@ -147,7 +147,7 @@ class EnablementService:
     # idempotent no-op so re-runs proceed to the Ops Insights step.
     DBM_ALREADY_ENABLED_MARKERS = ("already enabled", "already created")
 
-    def _enable_cloud_database(self, target: Target) -> None:
+    def _enable_cloud_database(self, target: Target, force_reconcile: bool = False) -> None:
         missing = missing_cloud_fields(target)
         if missing:
             raise ValueError(f"Target {target.name} is missing required fields: {', '.join(missing)}")
@@ -155,12 +155,29 @@ class EnablementService:
             cloud_enable_command(target), tolerated=self.DBM_ALREADY_ENABLED_MARKERS
         )
         if not applied:
-            # Already enabled — reconcile the connection so a corrected service
-            # name or rotated credential actually takes effect (a bare re-enable
-            # 409s and would otherwise leave stale, broken monitoring details).
-            print(f"Database Management already enabled for {target.name}; reconciling connection")
-            self.oci.run(cloud_modify_command(target))
+            # Already enabled. Reconciling (modify-database-management) takes ~2 min
+            # per target, so skip it when monitoring is already healthy — only
+            # reconcile to repair a broken connection (or when forced).
+            if not force_reconcile and self._dbm_monitoring_healthy(target):
+                print(f"Database Management already enabled and monitoring healthy for {target.name}; skipping reconcile")
+            else:
+                print(f"Database Management already enabled for {target.name}; reconciling connection")
+                self.oci.run(cloud_modify_command(target))
         self._enable_opsi_pe_comanaged_if_ready(target)
+
+    def _dbm_monitoring_healthy(self, target: Target) -> bool:
+        """True when the managed database reports an UP monitoring status.
+
+        For OCI-native databases the Managed Database OCID is the database OCID
+        itself. A flaky/failed read returns False so we fall back to reconciling.
+        """
+
+        if not target.resource_id:
+            return False
+        try:
+            return self.oci.get_managed_database_status(target.resource_id) == "UP"
+        except (RuntimeError, AttributeError):
+            return False
 
     def _enable_opsi_pe_comanaged_if_ready(self, target: Target) -> None:
         shared_missing = [

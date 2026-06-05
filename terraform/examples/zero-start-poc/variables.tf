@@ -131,3 +131,39 @@ variable "adb_storage_tbs" {
   description = "Storage in TB for provisioned Autonomous Databases."
   default     = 1
 }
+
+# --- Optional: enable DBM + OPSI on databases provisioned/known to this stack ---
+variable "enable_observability" {
+  type        = bool
+  description = "Call the dbm-opsi-enablement module to enable DBM/OPSI on observability_targets."
+  default     = false
+}
+
+variable "dbsnmp_secret_id" {
+  type        = string
+  description = "Vault secret OCID holding the DBSNMP password (required when enable_observability=true)."
+  default     = null
+}
+
+variable "opsi_private_endpoint_id" {
+  type        = string
+  description = "OPSI private endpoint OCID. When null, only DBM (not Ops Insights) is enabled."
+  default     = null
+}
+
+variable "observability_targets" {
+  description = <<-EOT
+    Targets for DBM/OPSI enablement, keyed by short name. service_name and host_ip
+    are runtime-discovered (lsnrctl / DB node IP), so they are supplied here after
+    the database is up rather than derived from Terraform attributes.
+  EOT
+  type = map(object({
+    database_id            = string
+    database_role          = string
+    database_resource_type = string # "database" | "pluggabledatabase"
+    service_name           = string
+    host_ip                = string
+    management_type        = optional(string, "ADVANCED")
+  }))
+  default = {}
+}

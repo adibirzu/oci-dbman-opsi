@@ -200,6 +200,15 @@ class OciCli:
                 return managed.get("id")
         return None
 
+    def get_managed_database_status(self, managed_database_id: str) -> str | None:
+        """Return the managed database's monitoring status (e.g. UP / DOWN / UNKNOWN)."""
+
+        data = self.run_json([
+            "database-management", "managed-database", "get",
+            "--managed-database-id", managed_database_id,
+        ])
+        return self._data(data).get("database-status")
+
     def list_named_credentials(self, compartment_id: str) -> list[dict[str, Any]]:
         data = self.run_json([
             "database-management", "named-credential", "list",
