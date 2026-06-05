@@ -176,12 +176,36 @@ list` flaps (0/2/7 items call-to-call), worsened by the 5-`--lifecycle-state` +
   reports `ACTIVE (ENABLED)` for both targets deterministically. Full KB entry:
   `KB.md` → "2026-06-05 OPSI list flap".
 
+## Defect 7 — Performance Hub privileges (DB-side grant)
+
+The OCI Console Performance Hub showed "Performance Hub requires granting of
+appropriate user privileges." The DBM monitoring user `DBSNMP` had the basic +
+advanced monitoring grants but not the Performance Hub / AWR set. Applied as SYSDBA
+(via bastion port-forward → `ssh opc` with the DB-system key → `sudo su - oracle` →
+`sqlplus / as sysdba`), using `CONTAINER=ALL` so the CDB common user covers CDB+PDB:
+
+```sql
+grant create procedure to DBSNMP container=all;
+grant select any dictionary to DBSNMP container=all;
+grant select_catalog_role to DBSNMP container=all;
+grant alter system to DBSNMP container=all;
+grant advisor to DBSNMP container=all;
+grant execute on sys.dbms_workload_repository to DBSNMP container=all;
+```
+
+The toolkit now generates these in `03-grant-advanced-diagnostics.sql` and checks
+them in `04-validate-monitoring-user.sql` (`src/dbman_opsi/db_scripts.py`). Verified
+present in `CDB$ROOT` and `PDB1`; `dbms_workload_repository.create_snapshot`
+succeeded (AWR — the Performance Hub data source — confirmed live, 46 snapshots).
+
 ## Final verified state (API)
 
 - DBM: CDB `DBMOPSI` **UP**, PDB `PDB1` **UP** (ADVANCED).
 - OPSI: DBMOPSI + PDB1 **ACTIVE**, `database-connection-status-details: SUCCESS`.
 - `validate` reports `Ops Insights ACTIVE (ENABLED)` for both, deterministically
   (via GET-by-OCID), across repeated runs.
+- Performance Hub: DBSNMP holds the AWR/advisor privileges in CDB+PDB; AWR snapshot
+  creation succeeds. Reopen Performance Hub in the Console.
 
 ## Phase 5 — OCI Console screenshots
 

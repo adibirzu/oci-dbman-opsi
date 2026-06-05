@@ -72,6 +72,40 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
 - Root cause: Network resources may be in a compartment or policy scope not fully readable by the current principal, or NSGs may be used instead of security lists.
 - Fix: Treat these as warnings when target DBM/DB-side validation succeeds, but verify actual private endpoint/listener connectivity through DBM/OPSI work requests and collection startup.
 
+## 2026-06-05 Performance Hub "requires granting of appropriate user privileges"
+
+### Performance Hub greys out / prompts to grant DBSNMP privileges
+
+- Symptom: OCI Console **Performance Hub** for a DBM-managed DBCS shows
+  "Performance Hub requires granting of appropriate user privileges. After granting
+  the required privileges, reopen Performance Hub." On-demand tasks (AWR, ADDM, ASH
+  Analytics, SQL Tuning, Real-Time SQL Monitoring) are unavailable.
+- Root cause: the DBM monitoring user (`DBSNMP`) had only the basic + advanced
+  *monitoring* grants, not the Performance Hub set (which needs to run advisors and
+  the workload repository).
+- Fix: as SYSDBA, grant the exact set the Console asks for. `DBSNMP` is a CDB common
+  user, so `CONTAINER=ALL` from the root covers the CDB **and** every PDB at once:
+  ```sql
+  grant create procedure to DBSNMP container=all;
+  grant select any dictionary to DBSNMP container=all;
+  grant select_catalog_role to DBSNMP container=all;
+  grant alter system to DBSNMP container=all;
+  grant advisor to DBSNMP container=all;
+  grant execute on sys.dbms_workload_repository to DBSNMP container=all;
+  ```
+  (Diagnostics and/or Tuning Pack licensing applies — review before granting.)
+- Toolkit: `03-grant-advanced-diagnostics.sql` now emits these (per container) and
+  `04-validate-monitoring-user.sql` checks them. `src/dbman_opsi/db_scripts.py`,
+  tests in `tests/test_db_scripts.py`.
+- Live DB access for the grant: bastion **port-forward** session to the DB node
+  `:22`, `ssh opc` with the DB-system key (kept under `generated/cap-ssh/`,
+  gitignored — *not* the bastion-session key, which only authenticates the tunnel),
+  `sudo su - oracle`, `sqlplus / as sysdba`, run the grants, then delete the bastion
+  session.
+- Validation: grants present in `dba_sys_privs` / `dba_role_privs` / `dba_tab_privs`
+  in **both `CDB$ROOT` and `PDB1`**; `dbms_workload_repository.create_snapshot`
+  succeeded (AWR — the Performance Hub data source — is live). Reopen Performance Hub.
+
 ## 2026-06-05 OPSI list flap → false `validate` NOT_FOUND (get-by-id fix)
 
 ### `validate` reports OPSI `NOT_FOUND` while insights are ACTIVE
