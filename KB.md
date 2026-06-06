@@ -72,6 +72,96 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
 - Root cause: Network resources may be in a compartment or policy scope not fully readable by the current principal, or NSGs may be used instead of security lists.
 - Fix: Treat these as warnings when target DBM/DB-side validation succeeds, but verify actual private endpoint/listener connectivity through DBM/OPSI work requests and collection startup.
 
+## 2026-06-05 Performance Hub "requires granting of appropriate user privileges"
+
+### Performance Hub greys out / prompts to grant DBSNMP privileges
+
+- Symptom: OCI Console **Performance Hub** for a DBM-managed DBCS shows
+  "Performance Hub requires granting of appropriate user privileges. After granting
+  the required privileges, reopen Performance Hub." On-demand tasks (AWR, ADDM, ASH
+  Analytics, SQL Tuning, Real-Time SQL Monitoring) are unavailable.
+- Root cause: the DBM monitoring user (`DBSNMP`) had only the basic + advanced
+  *monitoring* grants, not the Performance Hub set (which needs to run advisors and
+  the workload repository).
+- Fix: as SYSDBA, grant the exact set the Console asks for. `DBSNMP` is a CDB common
+  user, so `CONTAINER=ALL` from the root covers the CDB **and** every PDB at once:
+  ```sql
+  grant create procedure to DBSNMP container=all;
+  grant select any dictionary to DBSNMP container=all;
+  grant select_catalog_role to DBSNMP container=all;
+  grant alter system to DBSNMP container=all;
+  grant advisor to DBSNMP container=all;
+  grant execute on sys.dbms_workload_repository to DBSNMP container=all;
+  ```
+  (Diagnostics and/or Tuning Pack licensing applies — review before granting.)
+- Toolkit: `03-grant-advanced-diagnostics.sql` now emits these (per container) and
+  `04-validate-monitoring-user.sql` checks them. `src/dbman_opsi/db_scripts.py`,
+  tests in `tests/test_db_scripts.py`.
+- Live DB access for the grant: bastion **port-forward** session to the DB node
+  `:22`, `ssh opc` with the DB-system key (kept under `generated/cap-ssh/`,
+  gitignored — *not* the bastion-session key, which only authenticates the tunnel),
+  `sudo su - oracle`, `sqlplus / as sysdba`, run the grants, then delete the bastion
+  session.
+- Validation: grants present in `dba_sys_privs` / `dba_role_privs` / `dba_tab_privs`
+  in **both `CDB$ROOT` and `PDB1`**; `dbms_workload_repository.create_snapshot`
+  succeeded (AWR — the Performance Hub data source — is live). Reopen Performance Hub.
+
+## 2026-06-05 OPSI list flap → false `validate` NOT_FOUND (get-by-id fix)
+
+### `validate` reports OPSI `NOT_FOUND` while insights are ACTIVE
+
+- Symptom: `dbman-opsi validate` prints `Ops Insights NOT_FOUND (no Database Insight)`
+  for the CDB and/or PDB even though `oci opsi database-insights list ...
+  --lifecycle-state ACTIVE` shows them `ACTIVE` with
+  `database-connection-status-details: SUCCESS`.
+- Root cause (the real one): the OPSI `database-insights list` control plane in cap
+  is **non-deterministic**. Passing the full `--lifecycle-state` set
+  (`CREATING UPDATING ACTIVE FAILED NEEDS_ATTENTION`) together with `--all` in a
+  **single** call makes it flap between the full set, a partial set, and an exit-0
+  **empty** list for the same compartment, call to call (observed bouncing 0 / 2 / 7
+  items within seconds). `validate` matched the target `database-id` against
+  whatever that one flaky list happened to return → frequent false `NOT_FOUND`.
+  This was previously mislabeled a "known cap quirk"; it is partly self-inflicted by
+  the multi-state query shape.
+- Reliable signal (measured): a **single-resource**
+  `oci opsi database-insights get --database-insight-id <ocid>` is rock-solid
+  (10/10 `ACTIVE` for both CDB and PDB across back-to-back calls), where the
+  aggregated list flaps. A single `--lifecycle-state ACTIVE` list is stable in good
+  windows but still drops to empty in bad windows — not trustworthy alone.
+- Fix (code):
+  1. `OciCli.list_opsi_database_insights` now queries **one lifecycle state per call
+     and unions** results by insight OCID (each per-state call is individually
+     fault-tolerant), instead of the broken multi-state + `--all` single call.
+  2. New `OciCli.get_opsi_database_insight(insight_id)` (single-resource GET).
+  3. `validate` prefers the reliable GET: it reads `target.opsi_database_insight_id`
+     (now persisted in config) and calls `database-insights get`; only when the OCID
+     is unknown does it fall back to the list, and a positive list hit is then GET
+     for the authoritative state.
+  4. List-fallback verdict model never emits a *false* `NOT_FOUND`: a positive
+     `database-id` hit is authoritative; a negative is `NOT_FOUND` only from a
+     **clean window** — every attempt answered, every answer was a **complete**
+     per-state union (no lifecycle state skipped by a failed call), non-empty, and
+     the **same id-set on ≥2 attempts** without the target. Any empty / erroring /
+     incomplete / varying read makes the window inconclusive →
+     `UNKNOWN (insight query failed; verify in OCI Console)`. (`list_opsi_database_insights_complete`
+     carries the completeness flag; hardening per Codex review — an insight hiding
+     in a skipped `FAILED` state can no longer be mistaken for absent.)
+  5. Persisted both insight OCIDs in `dbman-opsi.cap.local.yaml`
+     (`opsi_database_insight_id:` per target) so `validate` is deterministic.
+- Files: `src/dbman_opsi/oci_cli.py`, `src/dbman_opsi/validation.py`. Tests:
+  `tests/test_oci_cli.py` (per-state union + fault tolerance),
+  `tests/test_validation.py` (get-by-id, positive-authoritative, stability-gated
+  NOT_FOUND, varying-list → UNKNOWN).
+- Validation: after the fix, `validate` reports `Ops Insights ACTIVE (ENABLED)` for
+  both CDB and PDB on repeated runs.
+- Discipline note (debugging pitfall that cost time here): `CommandRunner(dry_run=...)`
+  **defaults to `True`**. In dry-run mode `run()` returns a stub `{}` for *every*
+  call, so `OciCli(profile, region, CommandRunner())` (default) makes every read
+  return empty — indistinguishable from the flaky-endpoint symptom. When
+  reproducing read-only behavior in a REPL, pass `CommandRunner(dry_run=False)`.
+  The CLI's read paths (`validate`, `preflight`, `configure` reads) correctly use
+  `dry_run=False`.
+
 ## Current Demo Validation Checklist
 
 - DB system lifecycle: AVAILABLE.
