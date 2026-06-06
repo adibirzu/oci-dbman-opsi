@@ -179,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "validate":
         config = load_config(args.config)
-        runner = CommandRunner(dry_run=args.dry_run)
+        # validate is read-only: reads must always execute. Building the runner
+        # from args.dry_run would stub every OCI read to {} under
+        # `validate --dry-run`, yielding bogus NOT_FOUND/empty results.
+        runner = CommandRunner(dry_run=False)
         findings = ValidationService(OciCli(config.profile, config.region, runner)).validate(config)
         for finding in findings:
             print(f"- {finding}")

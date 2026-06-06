@@ -226,14 +226,31 @@ class EnablementService:
         compartment = target.compartment_id or ""
         if not compartment or not target.resource_id:
             return False
-        # The opsi list endpoint flaps (NotAuthorizedOrNotFound); retry a few
-        # times so a transient failure does not fall through to a conflicting create.
+        # Fast path: when the insight OCID is known, read it with the reliable
+        # single-resource GET instead of the flaky list — no false "inactive"
+        # from a partial list that dropped the insight.
+        if target.opsi_database_insight_id:
+            getter = getattr(self.oci, "get_opsi_database_insight", None)
+            if getter is not None:
+                try:
+                    detail = getter(target.opsi_database_insight_id)
+                except RuntimeError:
+                    detail = {}
+                if detail:
+                    return detail.get("lifecycle-state") == "ACTIVE"
+        # The opsi list endpoint flaps: it returns NotAuthorizedOrNotFound *or*
+        # an exit-0 empty list even when insights exist. Both are inconclusive,
+        # so retry on either. An empty result that falls through to create is
+        # only tolerated by the 409 "already exists" guard; retrying lets us
+        # detect the existing ACTIVE insight and skip the create round-trip.
         for _ in range(3):
             try:
                 insights = self.oci.list_opsi_database_insights(compartment)
             except AttributeError:
                 return False
             except RuntimeError:
+                continue
+            if not insights:
                 continue
             return any(
                 insight.get("database-id") == target.resource_id
