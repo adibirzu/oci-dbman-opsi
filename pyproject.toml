@@ -28,3 +28,6 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "--cov=dbman_opsi --cov-report=term-missing --cov-fail-under=80"
 pythonpath = ["src"]
+markers = [
+  "eval: capability + regression evals — a defect-signature regression fence (see tests/evals/README.md). Run with `pytest -m eval --no-cov`.",
+]

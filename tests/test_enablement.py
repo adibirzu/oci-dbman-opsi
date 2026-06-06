@@ -288,6 +288,47 @@ def test_enable_skips_opsi_create_when_insight_already_active(capsys) -> None:
     assert "already ACTIVE" in capsys.readouterr().out
 
 
+def test_enable_active_check_uses_reliable_get_when_insight_ocid_known(capsys) -> None:
+    # When the insight OCID is configured, the active-check reads it via the
+    # reliable GET and never consults the flaky list — so a partial list that
+    # dropped the insight cannot drive an unnecessary create.
+    class FakeOciGet(FakeOci):
+        def __init__(self, detail):
+            super().__init__(insights=[])  # list would say "no insight"
+            self.detail = detail
+            self.list_calls = 0
+
+        def list_opsi_database_insights(self, compartment_id):
+            self.list_calls += 1
+            return self.insights
+
+        def get_opsi_database_insight(self, insight_id):
+            return self.detail
+
+    oci = FakeOciGet({"lifecycle-state": "ACTIVE"})
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs",
+        name="db1",
+        resource_id="database-id",
+        compartment_id="compartment-id",
+        password_secret_id="secret-id",
+        private_endpoint_id="dbm-private-endpoint-id",
+        service_name="ORCLPDB1",
+        monitoring_user="DBSNMP",
+        opsi_private_endpoint_id="opsi-private-endpoint-id",
+        opsi_database_insight_id="insight-ocid",
+        opsi_credential_details_file="credential-details.json",
+        opsi_connection_details_file="connection-details.json",
+    )
+
+    service.enable_target(target)
+
+    assert not any("create-pe-comanged-database" in c for c in oci.commands)
+    assert oci.list_calls == 0  # reliable GET used, flaky list never touched
+    assert "already ACTIVE" in capsys.readouterr().out
+
+
 def test_enable_cloud_database_skips_opsi_when_payloads_missing(capsys) -> None:
     oci = FakeOci()
     service = EnablementService(oci)  # type: ignore[arg-type]

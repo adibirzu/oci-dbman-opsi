@@ -98,6 +98,17 @@ grant select on sys.gv_$instance to &monitoring_user;
 grant select on sys.v_$rman_backup_job_details to &monitoring_user;
 grant select on sys.v_$flashback_database_log to &monitoring_user;
 
+-- Performance Hub privileges (AWR, ADDM, ASH Analytics, SQL Tuning, Real-Time
+-- SQL Monitoring). The OCI Console prompt "Performance Hub requires granting of
+-- appropriate user privileges" maps to exactly this set for the monitoring user.
+-- These exercise the Diagnostics and/or Tuning Pack — review licensing first.
+grant create procedure to &monitoring_user;
+grant select any dictionary to &monitoring_user;
+grant select_catalog_role to &monitoring_user;
+grant alter system to &monitoring_user;
+grant advisor to &monitoring_user;
+grant execute on sys.dbms_workload_repository to &monitoring_user;
+
 -- Optional advanced diagnostics grants. Review against your licensing and security policy.
 -- For complete minimum and advanced Database Management credential scripts,
 -- Oracle documents MOS KB57458 and KB84103 as the authoritative sources.
@@ -118,7 +129,10 @@ where username = upper('&monitoring_user');
 select privilege
 from dba_sys_privs
 where grantee = upper('&monitoring_user')
-  and privilege in ('CREATE SESSION', 'SELECT ANY DICTIONARY', 'ANALYZE ANY', 'ANALYZE ANY DICTIONARY')
+  and privilege in (
+    'CREATE SESSION', 'SELECT ANY DICTIONARY', 'ANALYZE ANY', 'ANALYZE ANY DICTIONARY',
+    -- Performance Hub system privileges:
+    'CREATE PROCEDURE', 'ALTER SYSTEM', 'ADVISOR')
 order by privilege;
 
 select granted_role
@@ -130,7 +144,10 @@ select owner, table_name, privilege
 from dba_tab_privs
 where grantee = upper('&monitoring_user')
   and owner = 'SYS'
-  and table_name in ('DBMS_MONITOR', 'AUDIT_ACTIONS', 'V_$SESSION', 'GV_$SESSION')
+  and table_name in (
+    'DBMS_MONITOR', 'AUDIT_ACTIONS', 'V_$SESSION', 'GV_$SESSION',
+    -- Performance Hub object privilege:
+    'DBMS_WORKLOAD_REPOSITORY')
 order by table_name, privilege;
 """
 
