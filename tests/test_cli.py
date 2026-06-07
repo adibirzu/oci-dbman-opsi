@@ -257,3 +257,81 @@ def test_cli_configure_blocked_returns_nonzero(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
 
     assert main(["configure", "--config", str(config_path)]) == 1
+
+
+def test_cli_data_safe_dry_run_reports_ready(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            targets=(
+                Target(
+                    kind="dbcs",
+                    name="dbmopsi",
+                    compartment_id="compartment-id",
+                    db_system_id="dbsys-1",
+                    service_name="PDB1",
+                    data_safe_private_endpoint_id="dspe-1",
+                    services=("dbm", "opsi", "datasafe"),
+                ),
+                Target(kind="dbcs", name="no-ds", services=("dbm", "opsi")),
+            ),
+        ),
+    )
+
+    # Dry-run: no live registration, exit 0; only the opted-in target is processed.
+    assert main(["data-safe", "--config", str(config_path)]) == 0
+    out = capsys.readouterr().out
+    assert "data-safe dbmopsi" in out
+    assert "no-ds" not in out
+
+
+def test_cli_data_safe_blocked_returns_nonzero(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            # Missing db_system_id / service_name / PE and no subnet to create one.
+            targets=(Target(kind="dbcs", name="dbmopsi", compartment_id="compartment-id",
+                            services=("dbm", "opsi", "datasafe")),),
+        ),
+    )
+
+    assert main(["data-safe", "--config", str(config_path)]) == 1
+
+
+def test_cli_db_exec_plan_non_prod(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="cap",
+            region="eu-frankfurt-1",
+            targets=(Target(kind="dbcs", name="dbmopsi"),),
+        ),
+    )
+    assert main(["db-exec", "--config", str(config_path), "--scripts-dir", str(tmp_path / "s")]) == 0
+    out = capsys.readouterr().out
+    assert "db-exec dbmopsi: executed" in out
+    # Scripts were generated.
+    assert (tmp_path / "s" / "dbmopsi" / "01-create-monitoring-user.sql").exists()
+
+
+def test_cli_db_exec_plan_production_hands_off(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="emdemo",
+            region="us-phoenix-1",
+            targets=(Target(kind="dbcs", name="dbmopsi"),),
+        ),
+    )
+    assert main(["db-exec", "--config", str(config_path), "--scripts-dir", str(tmp_path / "s")]) == 0
+    assert "db-exec dbmopsi: handoff" in capsys.readouterr().out
