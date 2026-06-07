@@ -198,14 +198,41 @@ them in `04-validate-monitoring-user.sql` (`src/dbman_opsi/db_scripts.py`). Veri
 present in `CDB$ROOT` and `PDB1`; `dbms_workload_repository.create_snapshot`
 succeeded (AWR — the Performance Hub data source — confirmed live, 46 snapshots).
 
+## Defect 8 — ADDM Spotlight / AWR Explorer empty for the PDB (+ ORA-13750)
+
+Console **ADDM Spotlight** and **AWR Explorer** for `PDB1` were empty ("no ADDM
+analysis details" / "No AWR snapshots were found for this PDB"), and creating a
+**SQL Tuning Set** failed with `ORA-13750` (DBSNMP lacks `ADMINISTER SQL TUNING
+SET`). Root cause: in a CDB, automatic AWR snapshots run at the **root only** by
+default (`AWR_PDB_AUTOFLUSH_ENABLED=FALSE`). Fixed as SYSDBA on cap CDB+PDB1:
+
+```sql
+grant administer sql tuning set     to DBSNMP container=all;   -- fixes ORA-13750
+grant administer any sql tuning set to DBSNMP container=all;
+alter system set awr_pdb_autoflush_enabled = true scope=both;  -- CDB$ROOT
+alter session set container = PDB1;
+alter system set awr_pdb_autoflush_enabled = true scope=both;  -- PDB
+exec dbms_workload_repository.modify_snapshot_settings(interval=>60, retention=>11520);
+exec dbms_workload_repository.create_snapshot;                  -- seed
+```
+
+`DBMS_ADDM.ANALYZE_DB` over the latest two **PDB-dbid** snapshots (filter by
+`sys_context('USERENV','CON_DBID')`, else `ORA-13703`) completed with a report
+("ADDM detected that the system is a PDB"). OOTB: the toolkit now emits
+`05-enable-performance-hub.sql` (autoflush + PDB snapshot interval + seed) and adds
+the STS grants to `03-grant-advanced-diagnostics.sql`. See `KB.md` 2026-06-07.
+
 ## Final verified state (API)
 
 - DBM: CDB `DBMOPSI` **UP**, PDB `PDB1` **UP** (ADVANCED).
 - OPSI: DBMOPSI + PDB1 **ACTIVE**, `database-connection-status-details: SUCCESS`.
 - `validate` reports `Ops Insights ACTIVE (ENABLED)` for both, deterministically
   (via GET-by-OCID), across repeated runs.
-- Performance Hub: DBSNMP holds the AWR/advisor privileges in CDB+PDB; AWR snapshot
-  creation succeeds. Reopen Performance Hub in the Console.
+- Performance Hub: DBSNMP holds the AWR/advisor + SQL-Tuning-Set privileges in
+  CDB+PDB; AWR snapshot creation succeeds.
+- ADDM/AWR: `awr_pdb_autoflush_enabled=TRUE`, PDB AWR interval 1h / retention 8d,
+  PDB snapshots collecting; `DBMS_ADDM.ANALYZE_DB` (PDB) COMPLETED with a report.
+  ADDM Spotlight / AWR Explorer now populate; SQL Tuning Set creation succeeds.
 
 ## Phase 5 — OCI Console screenshots
 
