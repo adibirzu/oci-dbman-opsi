@@ -109,10 +109,62 @@ grant alter system to &monitoring_user;
 grant advisor to &monitoring_user;
 grant execute on sys.dbms_workload_repository to &monitoring_user;
 
+-- SQL Tuning Set support. Without this, creating a SQL Tuning Set from Performance
+-- Hub fails with ORA-13750 ("has not been granted the ADMINISTER SQL TUNING SET
+-- privilege"). ADMINISTER ANY SQL TUNING SET allows cross-schema tuning sets.
+grant administer sql tuning set to &monitoring_user;
+grant administer any sql tuning set to &monitoring_user;
+
 -- Optional advanced diagnostics grants. Review against your licensing and security policy.
 -- For complete minimum and advanced Database Management credential scripts,
 -- Oracle documents MOS KB57458 and KB84103 as the authoritative sources.
 """
+
+
+def performance_hub_sql(target: Target) -> str:
+    """Enable AWR snapshot collection so ADDM Spotlight / AWR Explorer have data.
+
+    In a CDB, automatic AWR snapshots run at the **root** only by default, so a
+    PDB's ADDM Spotlight shows "no ADDM analysis details" and AWR Explorer reports
+    "No AWR snapshots were found for this PDB". `AWR_PDB_AUTOFLUSH_ENABLED=TRUE`
+    turns on per-PDB AWR autoflush; the PDB also needs a non-zero snapshot
+    interval. Run this for the CDB (sets the instance master switch at root) and
+    for each PDB target (enables + sets the PDB snapshot interval and seeds a
+    first snapshot). Auto-ADDM then runs per snapshot.
+    """
+
+    is_pdb = target.database_role == "PDB"
+    body = _sql_header(target) + _container_block(target) + """
+prompt Enabling AWR PDB autoflush so Performance Hub ADDM/AWR collect data.
+alter system set awr_pdb_autoflush_enabled = true scope = both;
+"""
+    if is_pdb:
+        body += """
+-- PDB-level AWR snapshot interval (60 min) and retention (8 days). Without a
+-- non-zero interval the PDB never autoflushes and ADDM/AWR stay empty.
+begin
+  dbms_workload_repository.modify_snapshot_settings(interval => 60, retention => 11520);
+end;
+/
+
+-- Seed an initial PDB AWR snapshot; the next one follows on the autoflush
+-- interval, after which ADDM has a snapshot pair to analyze.
+declare
+  l_snap number;
+begin
+  l_snap := dbms_workload_repository.create_snapshot;
+  dbms_output.put_line('Created initial PDB AWR snapshot: ' || l_snap);
+end;
+/
+"""
+    body += """
+-- Verify (run again later to confirm snapshots accrue on the interval):
+column name format a30
+select count(*) as awr_snapshots
+from dba_hist_snapshot
+where dbid = sys_context('USERENV', 'CON_DBID');
+"""
+    return body
 
 
 def validation_sql(target: Target) -> str:
@@ -162,14 +214,18 @@ Run order:
 
 1. `01-create-monitoring-user.sql`
 2. `02-grant-basic-monitoring.sql`
-3. Optional: `03-grant-advanced-diagnostics.sql`
-4. `04-validate-monitoring-user.sql`
+3. Optional: `03-grant-advanced-diagnostics.sql` (Performance Hub + SQL Tuning Set privileges)
+4. Optional: `05-enable-performance-hub.sql` (AWR autoflush so ADDM Spotlight / AWR
+   Explorer collect data — required for PDB-level ADDM/AWR; run for the CDB and each PDB)
+5. `04-validate-monitoring-user.sql`
 
 Run from SQL*Plus or SQLcl as SYSDBA or an equivalent administrative account:
 
 ```sql
 sqlplus / as sysdba @01-create-monitoring-user.sql
 sqlplus / as sysdba @02-grant-basic-monitoring.sql
+sqlplus / as sysdba @03-grant-advanced-diagnostics.sql
+sqlplus / as sysdba @05-enable-performance-hub.sql
 sqlplus / as sysdba @04-validate-monitoring-user.sql
 ```
 
@@ -193,6 +249,7 @@ def generate_db_scripts(config: EnablementConfig, output_dir: str | Path) -> lis
             "02-grant-basic-monitoring.sql": basic_grants_sql(target),
             "03-grant-advanced-diagnostics.sql": advanced_grants_sql(target),
             "04-validate-monitoring-user.sql": validation_sql(target),
+            "05-enable-performance-hub.sql": performance_hub_sql(target),
         }
         for filename, content in files.items():
             path = target_dir / filename
