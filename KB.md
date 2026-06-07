@@ -106,6 +106,56 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
   in **both `CDB$ROOT` and `PDB1`**; `dbms_workload_repository.create_snapshot`
   succeeded (AWR — the Performance Hub data source — is live). Reopen Performance Hub.
 
+## 2026-06-07 ADDM Spotlight / AWR Explorer empty for a PDB (+ ORA-13750)
+
+### Performance Hub ADDM/AWR show no data for a PDB; SQL Tuning Set create fails
+
+- Symptoms (DBM-managed Base DB, CDB+PDB):
+  - **ADDM Spotlight** (PDB): "There are no ADDM analysis details available for the
+    time period... Check the current AWR snapshot interval and retention period."
+  - **AWR Explorer** (PDB): "No AWR snapshots were found for the selected database.
+    Please enable automatic AWR snapshot collection or manually load AWR data for
+    this PDB."
+  - **Create SQL Tuning Set**: `ORA-13750 - User "DBSNMP" has not been granted the
+    ADMINISTER SQL TUNING SET privilege.`
+- Root cause: in a CDB, automatic AWR snapshots run at the **root only** by default
+  (`AWR_PDB_AUTOFLUSH_ENABLED=FALSE`), so PDB-level ADDM/AWR have nothing to analyze.
+  And the DBM monitoring user lacked the SQL-Tuning-Set admin privilege.
+- Fix (as SYSDBA; verified live on cap CDB `DBMOPSI` + `PDB1`):
+  ```sql
+  -- SQL Tuning Set privilege (fixes ORA-13750); DBSNMP is a CDB common user
+  grant administer sql tuning set     to DBSNMP container=all;
+  grant administer any sql tuning set to DBSNMP container=all;
+
+  -- Enable PDB-level AWR: master switch at root, then per-PDB interval
+  alter system set awr_pdb_autoflush_enabled = true scope=both;          -- in CDB$ROOT
+  alter session set container = PDB1;
+  alter system set awr_pdb_autoflush_enabled = true scope=both;          -- in the PDB
+  exec dbms_workload_repository.modify_snapshot_settings(interval=>60, retention=>11520);
+  exec dbms_workload_repository.create_snapshot;                          -- seed
+  ```
+- Gotcha — **ADDM by PDB dbid**: inside a PDB, `dba_hist_snapshot` lists *both* the
+  root snapshots and the PDB's own. `DBMS_ADDM.ANALYZE_DB` analyzes the PDB's
+  `CON_DBID`, so the snapshot pair must be filtered to that dbid or you hit
+  `ORA-13703 ... snapshots not found`:
+  ```sql
+  select min(snap_id), max(snap_id) into l_beg, l_end from (
+    select snap_id from dba_hist_snapshot
+    where dbid = sys_context('USERENV','CON_DBID')
+    order by snap_id desc fetch first 2 rows only);
+  dbms_addm.analyze_db(l_task, l_beg, l_end, sys_context('USERENV','CON_DBID'));
+  ```
+  Note: `ANALYZE_DB`'s first arg is **IN OUT task_name** — passing it positionally
+  *and* as `task_name =>` raises `PLS-00703 multiple instances of named argument`.
+- OOTB: the toolkit now generates `05-enable-performance-hub.sql` (AWR autoflush +
+  PDB snapshot interval + seed) and adds the SQL-Tuning-Set grants to
+  `03-grant-advanced-diagnostics.sql`. Run 05 for the CDB and each PDB.
+  (`src/dbman_opsi/db_scripts.py`, tests in `tests/test_db_scripts.py`.)
+- Validation: after the fix, `awr_pdb_autoflush_enabled=TRUE`, PDB AWR interval 1h /
+  retention 8d, PDB AWR snapshots collecting, `DBMS_ADDM.ANALYZE_DB` task COMPLETED
+  with a report ("ADDM detected that the system is a PDB"), and SQL Tuning Set
+  creation succeeds.
+
 ## 2026-06-05 OPSI list flap → false `validate` NOT_FOUND (get-by-id fix)
 
 ### `validate` reports OPSI `NOT_FOUND` while insights are ACTIVE
