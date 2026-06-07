@@ -15,7 +15,8 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(
             r"ocid1\.(tenancy|compartment|instance|cluster|networksecuritygroup|"
             r"loadbalancer|subnet|vcn|vnic|bootvolume|loganalytics[a-z]+|user|"
-            r"database|autonomousdatabase|dbsystem|vault|key|secret)\.oc1\.[a-z0-9.-]*",
+            r"database|autonomousdatabase|pluggabledatabase|dbsystem|vault|key|secret|"
+            r"databaseinsight|datasafe[a-z]+|dataguardassociation)\.oc1\.[a-z0-9.-]*",
             re.IGNORECASE,
         ),
         "<OCI_OCID>",

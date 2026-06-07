@@ -13,6 +13,11 @@ from dbman_opsi.redact import redact_data
 
 TargetKind = Literal["dbcs", "autonomous", "exadata", "external-db", "external-exadata"]
 
+# The three observability/security/management pillars a target can opt into.
+# "dbm" = Database Management, "opsi" = Operations Insights, "datasafe" = Data Safe.
+Service = Literal["dbm", "opsi", "datasafe"]
+DEFAULT_SERVICES: tuple[Service, ...] = ("dbm", "opsi")
+
 
 @dataclass(frozen=True)
 class NetworkSelection:
@@ -54,6 +59,16 @@ class Target:
     provision: bool = False
     external_host: str | None = None
     external_os: Literal["linux", "windows", "solaris", "aix"] | None = None
+    # Data Safe: the registered target-database is a separate resource keyed back
+    # to this DB; its Data Safe private endpoint lives in the DB subnet.
+    data_safe_target_id: str | None = None
+    data_safe_private_endpoint_id: str | None = None
+    # Which pillars to enable for this target. Defaults to DBM + OPSI so existing
+    # configs (which omit the field) keep their prior behavior; Data Safe is opt-in.
+    services: tuple[Service, ...] = DEFAULT_SERVICES
+
+    def wants(self, service: Service) -> bool:
+        return service in self.services
 
 
 @dataclass(frozen=True)
@@ -82,7 +97,17 @@ def _vault_from_dict(value: dict[str, Any] | None) -> VaultSelection:
 
 
 def _target_from_dict(value: dict[str, Any]) -> Target:
-    return Target(**value)
+    data = dict(value)
+    if "services" in data and data["services"] is not None:
+        data["services"] = tuple(data["services"])
+    return Target(**data)
+
+
+def _target_to_dict(target: Target) -> dict[str, Any]:
+    # YAML safe_dump cannot represent tuples, so normalize services to a list.
+    data = dict(target.__dict__)
+    data["services"] = list(target.services)
+    return data
 
 
 def from_dict(value: dict[str, Any]) -> EnablementConfig:
@@ -110,7 +135,7 @@ def to_dict(config: EnablementConfig) -> dict[str, Any]:
         "compartment_id": config.compartment_id,
         "network": config.network.__dict__,
         "vault": config.vault.__dict__,
-        "targets": [target.__dict__ for target in config.targets],
+        "targets": [_target_to_dict(target) for target in config.targets],
         "policy_group_name": config.policy_group_name,
         "dry_run": config.dry_run,
         "terraform_dir": config.terraform_dir,

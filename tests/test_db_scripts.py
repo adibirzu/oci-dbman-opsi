@@ -3,6 +3,7 @@ from pathlib import Path
 from dbman_opsi.config import EnablementConfig, Target
 from dbman_opsi.db_scripts import (
     advanced_grants_sql,
+    data_safe_privileges_sql,
     generate_db_scripts,
     monitoring_user_sql,
     performance_hub_sql,
@@ -82,6 +83,35 @@ def test_validation_sql_checks_performance_hub_privileges() -> None:
     assert "ALTER SYSTEM" in sql
     assert "ADVISOR" in sql
     assert "DBMS_WORKLOAD_REPOSITORY" in sql
+
+
+def test_data_safe_privileges_sql_creates_account_and_grants() -> None:
+    sql = data_safe_privileges_sql(
+        Target(kind="dbcs", name="db1", monitoring_user="DBSNMP", services=("dbm", "opsi", "datasafe"))
+    ).lower()
+    assert "data safe service account" in sql
+    # Reusing an existing account must not reset its password when blank.
+    assert "blank to keep existing" in sql
+    assert "grant create session to &ds_user" in sql
+    assert "grant select_catalog_role to &ds_user" in sql
+    assert "grant audit_viewer to &ds_user" in sql
+    assert "grant audit_admin to &ds_user" in sql
+
+
+def test_generate_db_scripts_emits_data_safe_only_when_opted_in(tmp_path: Path) -> None:
+    config = EnablementConfig(
+        profile="DEFAULT", region="eu-frankfurt-1",
+        targets=(
+            Target(kind="dbcs", name="with-ds", services=("dbm", "opsi", "datasafe")),
+            Target(kind="dbcs", name="without-ds", services=("dbm", "opsi")),
+        ),
+    )
+    paths = generate_db_scripts(config, tmp_path)
+    names = {str(p) for p in paths}
+    assert any(p.name == "06-enable-data-safe.sql" and p.parent.name == "with-ds" for p in paths)
+    assert not (tmp_path / "without-ds" / "06-enable-data-safe.sql").exists()
+    # README reflects the pillar opt-in.
+    assert "06-enable-data-safe.sql" in (tmp_path / "with-ds" / "README.md").read_text()
 
 
 def test_generate_db_scripts_for_dbcs_and_exadata_only(tmp_path: Path) -> None:
