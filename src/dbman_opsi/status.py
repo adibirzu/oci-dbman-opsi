@@ -46,18 +46,28 @@ _RESOURCE_ENABLED_STATES = {"ACTIVE", "CREATING", "UPDATING"}
 
 
 def _candidate_ids(record: dict[str, Any]) -> set[str]:
-    """Collect every OCID a separate resource might use to reference a DB."""
+    """Collect every OCID a separate resource might use to reference a DB.
+
+    Important: do NOT include the record's own ``id`` — that is the insight/target
+    OCID, not the database it points at, and including it would never help a match
+    while risking false positives. The Data Safe ``target-database list`` summary
+    carries the join key in ``associated-resource-ids`` (the registered DB's OCID),
+    while the full GET carries it under ``database-details``; OPSI insights carry
+    it as ``database-id``. Read all of these.
+    """
 
     details = record.get("database-details") or {}
-    ids = {
+    ids: set[Any] = {
         record.get("database-id"),
-        record.get("id"),
         details.get("database-id"),
         details.get("db-system-id"),
         details.get("autonomous-database-id"),
         details.get("vm-cluster-id"),
         details.get("infrastructure-id"),
     }
+    associated = record.get("associated-resource-ids")
+    if isinstance(associated, list):
+        ids.update(associated)
     return {str(value) for value in ids if value}
 
 
