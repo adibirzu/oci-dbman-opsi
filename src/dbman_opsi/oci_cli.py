@@ -296,17 +296,23 @@ class OciCli:
         for existing in self.list_data_safe_private_endpoints(compartment_id):
             if existing.get("display-name") == display_name:
                 return str(existing.get("id"))
-        data = self.run_json([
+        # ``private-endpoint create`` returns a WORK REQUEST, so --wait-for-state
+        # takes work-request states (SUCCEEDED), not resource states (ACTIVE). Wait
+        # on the work request, then re-list to resolve the new PE's OCID.
+        self.run([
             "data-safe", "private-endpoint", "create",
             "--compartment-id", compartment_id,
             "--display-name", display_name,
             "--vcn-id", vcn_id,
             "--subnet-id", subnet_id,
-            "--wait-for-state", "ACTIVE",
+            "--wait-for-state", "SUCCEEDED",
             "--max-wait-seconds", "1200",
             "--wait-interval-seconds", "30",
         ])
-        return str(self._data(data).get("id"))
+        for created in self.list_data_safe_private_endpoints(compartment_id):
+            if created.get("display-name") == display_name:
+                return str(created.get("id"))
+        return ""
 
     def create_data_safe_target(
         self,
@@ -336,7 +342,9 @@ class OciCli:
             args.extend(["--connection-option", f"file://{connection_option_file}"])
         if credentials_file:
             args.extend(["--credentials", f"file://{credentials_file}"])
-        return str(self._data(self.run_json(args)).get("id"))
+        # Empty string (not "None") when no id is returned — e.g. a dry-run runner
+        # stubs the response to {} — so callers treat it as "not registered".
+        return str(self._data(self.run_json(args)).get("id") or "")
 
     # --- Database Management named & preferred credentials ---
 
