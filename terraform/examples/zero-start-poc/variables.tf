@@ -167,3 +167,33 @@ variable "observability_targets" {
   }))
   default = {}
 }
+
+variable "dbcs_cpu_core_count" {
+  description = "OCPU core count for a provisioned Flex-shape DB system."
+  type        = number
+  default     = 1
+}
+
+variable "dbcs_data_storage_gb" {
+  description = "Data storage (GB) for a provisioned VM DB system. Minimum 256."
+  type        = number
+  default     = 256
+}
+
+variable "config_file_profile" {
+  description = "OCI CLI config profile (~/.oci/config) the provider authenticates with."
+  type        = string
+  default     = "DEFAULT"
+}
+
+variable "availability_domain_index" {
+  description = "Index into the region's availability domains for provisioned DB systems (0-based). Pin to an AD with DB block-storage headroom."
+  type        = number
+  default     = 0
+}
+
+variable "dbcs_domain" {
+  description = "Network domain for a provisioned DB system. Required when the subnet has no DNS label. null derives it from a DNS-enabled subnet."
+  type        = string
+  default     = null
+}
