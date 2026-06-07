@@ -242,6 +242,57 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
 - Prevention: never redact in a value that downstream logic parses. Redact only at
   print/serialize boundaries (`--json`, `sanitized()`, log lines, error strings).
 
+## 2026-06-07 Provisioning a new Base DB via zero-start-poc terraform (apply-time failures)
+
+The example planned cleanly but failed at apply with a sequence of issues; all are
+now fixed in `terraform/examples/zero-start-poc`:
+
+1. **`Attempt to index null value` on the AD data source.** The `provider "oci"`
+   block only set `region`, so it used default auth (wrong/empty tenancy) and
+   `oci_identity_availability_domains` returned null. Fix: add
+   `config_file_profile = var.config_file_profile` and pass the profile (e.g.
+   `cap`). Symptom is generic — any data source silently returns empty.
+2. **`vm-block-storage-gb` LimitExceeded.** This is a **Database** service limit
+   (not Block Volume), enforced **per availability domain** (1050 GB/AD here). The
+   existing DB system filled AD-1 (1024/1050); AD-2/AD-3 were empty. The terraform
+   hardcoded `ads[0]`. Fix: `availability_domain_index` var to pin a DB system to
+   an AD with headroom. Check with:
+   `oci limits resource-availability get --service-name database --limit-name vm-block-storage-gb --availability-domain <AD> --compartment-id <tenancy>`.
+3. **`domain name cannot be null` on LaunchDbSystem.** The subnet has no DNS label,
+   so the DB system can't derive its network domain and one must be passed
+   explicitly. Fix: `domain = var.dbcs_domain`; reuse the existing DB system's
+   domain (`oci db system get ... --query 'data.domain'`).
+4. **Flex shape needs explicit sizing.** `VM.Standard.E4.Flex` requires
+   `cpu_core_count`, and a VM DB system requires `data_storage_size_in_gb`
+   (min 256). Added both as vars.
+
+Secrets (`ssh_public_keys`, `db_admin_password`) go in a gitignored
+`secrets.auto.tfvars.json` (now `*.auto.tfvars*` and `*.tfvars` are gitignored),
+never in `render_tfvars` or committed files.
+
+## 2026-06-07 Data Safe target stuck NEEDS_ATTENTION (ORA-01017) + DBSNMP rotation
+
+- Symptom: `data-safe target-database` registers but stays NEEDS_ATTENTION with
+  `lifecycle-details = "Failed to connect to database. ORA-01017: invalid
+  username/password"`. The network path is fine (DS PE reached the listener) —
+  only the credential failed.
+- Root cause: the stored DBSNMP password was stale, and DBSNMP could not be reset
+  to it because the **CDB** password verify function requires **2+ special
+  characters** (`ORA-20000`). DBSNMP is a **common user**, so its password must be
+  changed from the root with `alter user DBSNMP identified by "..." container=ALL`
+  — an in-PDB `alter user` fails with `ORA-65066` ("must apply to all containers").
+- Fix (single-account POC): rotate DBSNMP to a policy-compliant password
+  CONTAINER=ALL via Bastion, then keep the stack consistent by updating BOTH the
+  Vault secret (DBM + OPSI both read it via `passwordSecretId`) and the Data Safe
+  target credentials (`data-safe target-database update --credentials file://... --force`).
+  DBM monitoring stayed `UP`, OPSI `ENABLED`, Data Safe target reached `ACTIVE`.
+- `data-safe private-endpoint create` and `target-database update` return WORK
+  REQUESTS: `--wait-for-state` takes `SUCCEEDED`, not `ACTIVE`. `update` also needs
+  `--force` to skip the confirmation prompt non-interactively.
+- Detection nuance: a DATABASE_CLOUD_SERVICE target registered with a PDB service
+  name associates (in `associated-resource-ids`) with the **DB system**, so
+  discovery attributes Data Safe to the CDB/DB-system level, not the individual PDB.
+
 ## Current Demo Validation Checklist
 
 - DB system lifecycle: AVAILABLE.
