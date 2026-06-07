@@ -212,6 +212,36 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
   The CLI's read paths (`validate`, `preflight`, `configure` reads) correctly use
   `dry_run=False`.
 
+## 2026-06-07 Redaction in the data path broke OCID-keyed joins (Data Safe detection)
+
+- Symptom: live `discover` reported **Data Safe ENABLED for every database** in the
+  compartment, including databases with no registered Data Safe target. The same
+  matcher returned the correct NOT_ENABLED when called directly in a REPL with a
+  pasted real OCID.
+- Scope: any feature that joins two OCI resources by OCID parsed out of CLI output
+  — the new discovery pillar matching (OPSI insight / Data Safe target per DB),
+  `create_named_credential`/`set_preferred_named_credential` id linkage,
+  `find_managed_database_id`, and `validate`'s insight id-set comparison.
+- Root cause: `CommandRunner.run()` ran `redact_text()` over `process.stdout`
+  **before** `CommandResult.json()` parsed it, so every OCID became the literal
+  string `<OCI_OCID>`. With both sides of a join collapsed to the same token,
+  `wanted & candidate_ids` matched everything-to-everything. Redaction (a display
+  concern) was wrongly applied in the data path.
+- Fix:
+  - Runner returns RAW stdout/stderr for `.json()`. Only the dry-run command echo
+    and the `RuntimeError` message stay redacted (those are user-facing text).
+  - Redact at the display boundary instead: CLI `--json` output wraps `to_dict()`
+    in `redact_data()`. Human `discover` output already prints real OCIDs on
+    purpose (operators copy them into config; it is their own tenancy).
+  - Second bug in the same area: the Data Safe `target-database list` summary has
+    `database-details = null` and carries the registered DB OCID in
+    `associated-resource-ids`; the matcher now reads that and no longer treats a
+    target's own `id` as a DB reference.
+- Validation: live on cap — DBMOPSI/PDB1 correctly NOT_ENABLED for Data Safe; the
+  three registered ATP targets ENABLED; an unregistered ATP NOT_ENABLED.
+- Prevention: never redact in a value that downstream logic parses. Redact only at
+  print/serialize boundaries (`--json`, `sanitized()`, log lines, error strings).
+
 ## Current Demo Validation Checklist
 
 - DB system lifecycle: AVAILABLE.
