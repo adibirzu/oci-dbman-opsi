@@ -22,6 +22,18 @@ def test_runner_raises_on_failed_command() -> None:
         raise AssertionError("Expected RuntimeError")
 
 
+def test_runner_returns_raw_ocids_for_logic() -> None:
+    # The data path must NOT redact OCIDs: discovery/credential joins parse real
+    # OCIDs out of command output. Redacting here would collapse every OCID to the
+    # same token and make OCID-keyed joins match everything-to-everything.
+    runner = CommandRunner(dry_run=False)
+    ocid = "ocid1" + ".database.oc1..realexample"
+
+    result = runner.run(["python3", "-c", f"print('{{\"data\": {{\"id\": \"{ocid}\"}}}}')"])
+
+    assert result.json()["data"]["id"] == ocid
+
+
 def test_runner_redacts_failed_command() -> None:
     runner = CommandRunner(dry_run=False)
 

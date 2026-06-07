@@ -41,9 +41,16 @@ class CommandRunner:
             capture_output=True,
             text=True,
         )
-        stdout = redact_text(process.stdout)
-        stderr = redact_text(process.stderr)
+        # Return RAW stdout/stderr: callers parse OCIDs out of this for resource
+        # joins (discovery's pillar matching, named-credential id lookup, etc.).
+        # Redaction is a *display* concern and is applied at the print boundary
+        # (CLI --json output, sanitized config). Redacting here silently collapses
+        # every OCID to "<OCI_OCID>", which makes OCID-keyed joins match
+        # everything-to-everything. Error messages are still redacted because they
+        # are surfaced to the user as text.
         if check and process.returncode != 0:
             safe_command = redact_text(" ".join(safe_args))
-            raise RuntimeError(f"Command failed ({process.returncode}): {safe_command}\n{stderr}")
-        return CommandResult(safe_args, stdout, stderr, process.returncode)
+            raise RuntimeError(
+                f"Command failed ({process.returncode}): {safe_command}\n{redact_text(process.stderr)}"
+            )
+        return CommandResult(safe_args, process.stdout, process.stderr, process.returncode)

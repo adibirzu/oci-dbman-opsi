@@ -24,6 +24,7 @@ from dbman_opsi.opsi_payloads import generate_opsi_payloads
 from dbman_opsi.orchestrator import ConfigureReport, ConfigureService
 from dbman_opsi.preflight import PreflightService
 from dbman_opsi.prerequisites import PrerequisiteService
+from dbman_opsi.redact import redact_data
 from dbman_opsi.reporting import print_configure_report, print_inventory, print_preflight_report
 from dbman_opsi.runner import CommandRunner
 from dbman_opsi.terraform import run_terraform, write_tfvars
@@ -265,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             compartments += oci.list_compartments(tenancy)
         inventory = DiscoveryService(oci).discover(compartments)
         if args.json:
-            print(json.dumps(inventory.to_dict(), indent=2, sort_keys=True))
+            print(json.dumps(redact_data(inventory.to_dict()), indent=2, sort_keys=True))
         else:
             print_inventory(inventory)
         return 0
@@ -295,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         service = PreflightService(OciCli(config.profile, config.region, CommandRunner(dry_run=False)))
         report = service.run(config, db_check=db_check)
         if args.json:
-            print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+            print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
         else:
             print_preflight_report(report)
         return 0 if report.ok else 1
@@ -311,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
             config, mode=mode, handoff_dir=args.output, force=args.force
         )
         if args.json:
-            print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+            print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
         else:
             print_configure_report(report)
         return 0 if report.ok else 1
