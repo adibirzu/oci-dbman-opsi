@@ -167,6 +167,65 @@ where dbid = sys_context('USERENV', 'CON_DBID');
     return body
 
 
+def data_safe_privileges_sql(target: Target) -> str:
+    """Create/reuse the Data Safe service account and grant baseline privileges.
+
+    Data Safe target registration needs a database service account it connects as.
+    Oracle's Console generates a parameterized ``dscs_privileges.sql`` covering all
+    features; this script provides a self-contained, auditable baseline for the
+    read-mostly features (Security Assessment, User Assessment, Activity Auditing)
+    and points to the Console script for Data Masking / Data Discovery, which need
+    write access to application schemas and are target-specific.
+
+    For the POC the default service account is the existing monitoring user
+    (DBSNMP) so there is a single account; production should use a dedicated user.
+    """
+
+    user = target.monitoring_user or "DBSNMP"
+    return _sql_header(target) + _container_block(target) + f"""
+accept ds_user char default '{user}' prompt 'Data Safe service account [{user}]: '
+accept ds_password char hide prompt 'Data Safe service account password (blank to keep existing): '
+
+-- Create the account if missing; otherwise leave the existing password in place
+-- when none is entered (so reusing DBSNMP does not reset its password).
+declare
+  l_count number;
+begin
+  select count(*) into l_count from dba_users where username = upper('&ds_user');
+  if l_count = 0 then
+    execute immediate 'create user ' || dbms_assert.simple_sql_name(upper('&ds_user')) ||
+      ' identified by "' || replace('&ds_password', '"', '""') || '" account unlock';
+    dbms_output.put_line('Created Data Safe service account ' || upper('&ds_user'));
+  elsif length('&ds_password') > 0 then
+    execute immediate 'alter user ' || dbms_assert.simple_sql_name(upper('&ds_user')) ||
+      ' identified by "' || replace('&ds_password', '"', '""') || '" account unlock';
+    dbms_output.put_line('Updated/unlocked Data Safe service account ' || upper('&ds_user'));
+  else
+    dbms_output.put_line('Reusing existing account ' || upper('&ds_user'));
+  end if;
+end;
+/
+
+-- Baseline: connect + read the data dictionary (Security & User Assessment read
+-- DBA_USERS, DBA_ROLE_PRIVS, DBA_SYS_PRIVS, init parameters, etc.).
+grant create session to &ds_user;
+grant select_catalog_role to &ds_user;
+grant select any dictionary to &ds_user;
+
+-- Activity Auditing: read and manage unified audit policies. AUDIT_VIEWER reads
+-- the audit trail; AUDIT_ADMIN lets Data Safe provision/manage audit policies on
+-- the target. Both are Oracle-supplied roles (12.2+).
+grant audit_viewer to &ds_user;
+grant audit_admin to &ds_user;
+
+-- NOTE: Data Masking and Data Discovery require additional, schema-specific
+-- privileges (read/write on the application schemas being discovered/masked).
+-- Download the per-target privilege script from the OCI Console
+-- (Data Safe > Target databases > Register > "Download Privilege Script") and
+-- run it for those features.
+"""
+
+
 def validation_sql(target: Target) -> str:
     user = target.monitoring_user or "DBSNMP"
     return _sql_header(target) + _container_block(target) + f"""
@@ -205,10 +264,20 @@ order by table_name, privilege;
 
 
 def readme_text(target: Target, config: EnablementConfig) -> str:
+    data_safe_step = (
+        "\n6. Optional: `06-enable-data-safe.sql` (Data Safe service account + baseline"
+        " Security/User Assessment and Auditing privileges)"
+        if target.wants("datasafe")
+        else ""
+    )
+    data_safe_run = (
+        "sqlplus / as sysdba @06-enable-data-safe.sql\n" if target.wants("datasafe") else ""
+    )
     return f"""# Database SQL scripts for {target.name}
 
 Target kind: {target.kind}
 Region: {config.region}
+Pillars: {', '.join(target.services)}
 
 Run order:
 
@@ -217,7 +286,7 @@ Run order:
 3. Optional: `03-grant-advanced-diagnostics.sql` (Performance Hub + SQL Tuning Set privileges)
 4. Optional: `05-enable-performance-hub.sql` (AWR autoflush so ADDM Spotlight / AWR
    Explorer collect data — required for PDB-level ADDM/AWR; run for the CDB and each PDB)
-5. `04-validate-monitoring-user.sql`
+5. `04-validate-monitoring-user.sql`{data_safe_step}
 
 Run from SQL*Plus or SQLcl as SYSDBA or an equivalent administrative account:
 
@@ -227,7 +296,7 @@ sqlplus / as sysdba @02-grant-basic-monitoring.sql
 sqlplus / as sysdba @03-grant-advanced-diagnostics.sql
 sqlplus / as sysdba @05-enable-performance-hub.sql
 sqlplus / as sysdba @04-validate-monitoring-user.sql
-```
+{data_safe_run}```
 
 For DBCS and Exadata PDB targets, enter the PDB/container name that matches the service configured in `dbman-opsi`.
 The generated scripts do not contain plaintext passwords.
@@ -251,6 +320,10 @@ def generate_db_scripts(config: EnablementConfig, output_dir: str | Path) -> lis
             "04-validate-monitoring-user.sql": validation_sql(target),
             "05-enable-performance-hub.sql": performance_hub_sql(target),
         }
+        # Data Safe DB-side privileges only when the target opts into the security
+        # pillar (services defaults to DBM + OPSI, so this is opt-in).
+        if target.wants("datasafe"):
+            files["06-enable-data-safe.sql"] = data_safe_privileges_sql(target)
         for filename, content in files.items():
             path = target_dir / filename
             path.write_text(content, encoding="utf-8")

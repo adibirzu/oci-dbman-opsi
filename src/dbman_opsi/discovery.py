@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from dbman_opsi.oci_cli import OciCli
-from dbman_opsi.status import dbm_status
+from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status
 
 
 def _safe(call: Callable[[], Any], default: Any, attempts: int = 2) -> Any:
@@ -68,9 +68,40 @@ class DatabaseInfo:
     role: str
     state: str
     dbm_status: str
+    opsi_status: str = "NOT_ENABLED"
+    data_safe_status: str = "NOT_ENABLED"
+
+    @property
+    def enabled_services(self) -> tuple[str, ...]:
+        """Pillars already on for this DB ('dbm', 'opsi', 'datasafe')."""
+
+        from dbman_opsi.status import is_enabled
+
+        result: list[str] = []
+        if is_enabled(self.dbm_status):
+            result.append("dbm")
+        if str(self.opsi_status).upper() == "ENABLED":
+            result.append("opsi")
+        if str(self.data_safe_status).upper() == "ENABLED":
+            result.append("datasafe")
+        return tuple(result)
+
+    @property
+    def missing_services(self) -> tuple[str, ...]:
+        return tuple(s for s in ("dbm", "opsi", "datasafe") if s not in self.enabled_services)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "role": self.role, "state": self.state, "dbm_status": self.dbm_status}
+        return {
+            "id": self.id,
+            "name": self.name,
+            "role": self.role,
+            "state": self.state,
+            "dbm_status": self.dbm_status,
+            "opsi_status": self.opsi_status,
+            "data_safe_status": self.data_safe_status,
+            "enabled_services": list(self.enabled_services),
+            "missing_services": list(self.missing_services),
+        }
 
 
 @dataclass(frozen=True)
@@ -83,6 +114,7 @@ class CompartmentInventory:
     autonomous: tuple[DatabaseInfo, ...] = ()
     dbm_private_endpoints: tuple[dict[str, Any], ...] = ()
     opsi_private_endpoints: tuple[dict[str, Any], ...] = ()
+    data_safe_private_endpoints: tuple[dict[str, Any], ...] = ()
     management_agents: tuple[str, ...] = ()
     bastions: tuple[str, ...] = ()
 
@@ -91,6 +123,7 @@ class CompartmentInventory:
         return not any(
             (self.subnets, self.vaults, self.databases, self.autonomous,
              self.dbm_private_endpoints, self.opsi_private_endpoints,
+             self.data_safe_private_endpoints,
              self.management_agents, self.bastions)
         )
 
@@ -104,6 +137,7 @@ class CompartmentInventory:
             "autonomous": [item.to_dict() for item in self.autonomous],
             "dbm_private_endpoints": [pe.get("name") or pe.get("display-name") for pe in self.dbm_private_endpoints],
             "opsi_private_endpoints": [pe.get("display-name") for pe in self.opsi_private_endpoints],
+            "data_safe_private_endpoints": [pe.get("display-name") for pe in self.data_safe_private_endpoints],
             "management_agents": list(self.management_agents),
             "bastions": list(self.bastions),
         }
@@ -126,15 +160,21 @@ class DiscoveryService:
 
     def _compartment(self, compartment: dict[str, Any]) -> CompartmentInventory:
         cid = str(compartment.get("id"))
+        # Pre-fetch the standalone OPSI insight and Data Safe target collections
+        # once, then join them back to each DB by OCID (avoids an N+1 lookup per
+        # database). Best-effort: an empty read just yields NOT_ENABLED statuses.
+        insights = _safe(lambda: self.oci.list_opsi_database_insights(cid), [])
+        data_safe_targets = _safe(lambda: self.oci.list_data_safe_targets(cid), [])
         return CompartmentInventory(
             name=str(compartment.get("name", "")),
             id=cid,
             subnets=self._subnets(cid),
             vaults=self._vaults(cid),
-            databases=self._databases(cid),
-            autonomous=self._autonomous(cid),
+            databases=self._databases(cid, insights, data_safe_targets),
+            autonomous=self._autonomous(cid, insights, data_safe_targets),
             dbm_private_endpoints=tuple(_safe(lambda: self.oci.list_db_management_private_endpoints(cid), [])),
             opsi_private_endpoints=tuple(_safe(lambda: self.oci.list_opsi_private_endpoints(cid), [])),
+            data_safe_private_endpoints=tuple(_safe(lambda: self.oci.list_data_safe_private_endpoints(cid), [])),
             management_agents=tuple(
                 str(a.get("display-name", "")) for a in _safe(lambda: self.oci.list_management_agents(cid), [])
             ),
@@ -183,28 +223,54 @@ class DiscoveryService:
             )
         return tuple(vaults)
 
-    def _databases(self, cid: str) -> tuple[DatabaseInfo, ...]:
+    def _databases(
+        self,
+        cid: str,
+        insights: list[dict[str, Any]],
+        data_safe_targets: list[dict[str, Any]],
+    ) -> tuple[DatabaseInfo, ...]:
         databases: list[DatabaseInfo] = []
         for system in _safe(lambda: self.oci.list_db_systems(cid), []):
+            system_id = str(system.get("id"))
             for database in _safe(lambda s=system: self.oci.list_databases(cid, str(s.get("id"))), []):
-                databases.append(self._database_info(database, "CDB"))
+                databases.append(
+                    self._database_info(database, "CDB", insights, data_safe_targets, db_system_id=system_id)
+                )
         for pdb in _safe(lambda: self.oci.list_pluggable_databases(cid), []):
-            databases.append(self._database_info(pdb, "PDB", name_key="pdb-name"))
+            databases.append(self._database_info(pdb, "PDB", insights, data_safe_targets, name_key="pdb-name"))
         return tuple(databases)
 
-    def _autonomous(self, cid: str) -> tuple[DatabaseInfo, ...]:
+    def _autonomous(
+        self,
+        cid: str,
+        insights: list[dict[str, Any]],
+        data_safe_targets: list[dict[str, Any]],
+    ) -> tuple[DatabaseInfo, ...]:
         return tuple(
-            self._database_info(adb, "AUTONOMOUS", name_key="display-name", kind="autonomous")
+            self._database_info(
+                adb, "AUTONOMOUS", insights, data_safe_targets, name_key="display-name", kind="autonomous"
+            )
             for adb in _safe(lambda: self.oci.list_autonomous_databases(cid), [])
         )
 
     @staticmethod
-    def _database_info(record: dict[str, Any], role: str, name_key: str = "db-name", kind: str = "dbcs") -> DatabaseInfo:
+    def _database_info(
+        record: dict[str, Any],
+        role: str,
+        insights: list[dict[str, Any]],
+        data_safe_targets: list[dict[str, Any]],
+        name_key: str = "db-name",
+        kind: str = "dbcs",
+        db_system_id: str | None = None,
+    ) -> DatabaseInfo:
         status_role = "PDB" if role == "PDB" else "CDB"
+        db_id = str(record.get("id"))
         return DatabaseInfo(
-            id=str(record.get("id")),
+            id=db_id,
             name=str(record.get(name_key) or record.get("display-name") or ""),
             role=role,
             state=str(record.get("lifecycle-state", "")),
             dbm_status=str(dbm_status(record, kind, status_role) or "NOT_ENABLED"),
+            opsi_status=opsi_insight_status(insights, db_id),
+            data_safe_status=data_safe_status(data_safe_targets, db_id, db_system_id),
         )
