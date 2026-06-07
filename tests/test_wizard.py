@@ -37,6 +37,7 @@ def test_wizard_discovers_and_selects_resources(monkeypatch) -> None:
             "",
             "",
             "",
+            "",  # pillars (defaults to dbm,opsi)
             "no",
         ]
     )
@@ -49,6 +50,51 @@ def test_wizard_discovers_and_selects_resources(monkeypatch) -> None:
     assert config.network.subnet_id == "subnet-id"
     assert config.vault.create_vault is True
     assert config.targets[0].resource_id == "adb-id"
+    assert config.targets[0].services == ("dbm", "opsi")
+
+
+class DbcsOci(FakeOci):
+    def list_db_systems(self, compartment_id):
+        return [{"id": "dbsys-1", "display-name": "dbmopsi"}]
+
+    def list_pluggable_databases(self, compartment_id):
+        return []
+
+
+def test_wizard_captures_data_safe_selection_for_dbcs(monkeypatch) -> None:
+    answers = iter(
+        [
+            "tenancy-id",
+            "1",          # compartment
+            "no",         # create network? no
+            "1",          # vcn
+            "1",          # subnet
+            "yes",        # create vault? yes
+            "",           # add a target? (default yes)
+            "dbcs",       # kind
+            "dbmopsi",    # name
+            "no",         # provision? no
+            "1",          # select db system
+            "PDB1",       # service name
+            "",           # monitoring user
+            "",           # password secret
+            "",           # private endpoint
+            "dbm,opsi,datasafe",  # pillars
+            "dspe-1",     # data safe private endpoint
+            "no",         # discover PDBs? no
+            "no",         # add another target? no
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda prompt: next(answers))
+
+    config = run_wizard("cap", "eu-frankfurt-1", DbcsOci())  # type: ignore[arg-type]
+
+    target = config.targets[0]
+    assert target.services == ("dbm", "opsi", "datasafe")
+    assert target.wants("datasafe") is True
+    # db_system_id captured from the selected DB system (needed for DS registration).
+    assert target.db_system_id == "dbsys-1"
+    assert target.data_safe_private_endpoint_id == "dspe-1"
 
 
 def test_wizard_falls_back_when_discovery_fails(monkeypatch) -> None:

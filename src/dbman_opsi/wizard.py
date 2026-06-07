@@ -2,8 +2,32 @@
 
 from __future__ import annotations
 
-from dbman_opsi.config import EnablementConfig, NetworkSelection, Target, VaultSelection
+from dbman_opsi.config import (
+    DEFAULT_SERVICES,
+    EnablementConfig,
+    NetworkSelection,
+    Service,
+    Target,
+    VaultSelection,
+)
 from dbman_opsi.oci_cli import OciCli
+
+_VALID_SERVICES = ("dbm", "opsi", "datasafe")
+
+
+def _ask_services() -> tuple[Service, ...]:
+    """Prompt for which observability/security/management pillars to enable.
+
+    'dbm' = Database Management, 'opsi' = Operations Insights, 'datasafe' = Data
+    Safe. Defaults to DBM + OPSI; Data Safe (security) is opt-in.
+    """
+
+    raw = _ask(
+        "Enable which pillars? comma-separated from dbm,opsi,datasafe",
+        ",".join(DEFAULT_SERVICES),
+    )
+    chosen = tuple(s.strip().lower() for s in raw.split(",") if s.strip() in _VALID_SERVICES)
+    return chosen or DEFAULT_SERVICES  # type: ignore[return-value]
 
 
 def _safe_discover(description: str, callback) -> list[dict[str, object]]:
@@ -74,6 +98,11 @@ def _discover_pdb_targets(cdb: Target, compartment_id: str, oci: OciCli) -> list
                 password_secret_id=cdb.password_secret_id,
                 private_endpoint_id=cdb.private_endpoint_id,
                 opsi_private_endpoint_id=cdb.opsi_private_endpoint_id,
+                # Inherit the parent's pillar selection, DB system, and Data Safe PE
+                # so PDB targets register the same services as their CDB.
+                db_system_id=cdb.db_system_id,
+                data_safe_private_endpoint_id=cdb.data_safe_private_endpoint_id,
+                services=cdb.services,
                 database_role="PDB",
                 parent_cdb_id=cdb.resource_id,
             )
@@ -133,6 +162,18 @@ def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> Enableme
         monitoring_user = _ask("Monitoring username", "DBSNMP")
         password_secret_id = _ask("Password secret OCID (leave blank if provision step will create it)")
         private_endpoint_id = _ask("DB Management private endpoint OCID (leave blank if provision step will create it)")
+        services = _ask_services()
+        # For Base DB / Exadata the discovered list is DB systems, so the selection
+        # is the DB system OCID — needed for Data Safe DATABASE_CLOUD_SERVICE
+        # registration. Autonomous targets don't have a DB system.
+        db_system_id = None
+        if kind in {"dbcs", "exadata"} and selected_target and selected_target.get("id"):
+            db_system_id = str(selected_target.get("id"))
+        data_safe_private_endpoint_id = (
+            _ask("Data Safe private endpoint OCID (leave blank to create during enable)")
+            if "datasafe" in services
+            else ""
+        )
         external_os = None
         external_host = None
         if kind.startswith("external"):
@@ -147,6 +188,9 @@ def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> Enableme
             monitoring_user=monitoring_user or None,
             password_secret_id=password_secret_id or None,
             private_endpoint_id=private_endpoint_id or None,
+            db_system_id=db_system_id,
+            data_safe_private_endpoint_id=data_safe_private_endpoint_id or None,
+            services=services,
             provision=provision,
             external_host=external_host or None,
             external_os=external_os or None,  # type: ignore[arg-type]

@@ -280,6 +280,34 @@ class OciCli:
         ])
         return self._items(data)
 
+    def create_data_safe_private_endpoint(
+        self,
+        compartment_id: str,
+        display_name: str,
+        vcn_id: str,
+        subnet_id: str,
+    ) -> str:
+        """Create (or reuse) a Data Safe private endpoint in the DB subnet.
+
+        Idempotent by display name. Waits for the endpoint to go ACTIVE so the
+        returned OCID is immediately usable for target registration.
+        """
+
+        for existing in self.list_data_safe_private_endpoints(compartment_id):
+            if existing.get("display-name") == display_name:
+                return str(existing.get("id"))
+        data = self.run_json([
+            "data-safe", "private-endpoint", "create",
+            "--compartment-id", compartment_id,
+            "--display-name", display_name,
+            "--vcn-id", vcn_id,
+            "--subnet-id", subnet_id,
+            "--wait-for-state", "ACTIVE",
+            "--max-wait-seconds", "1200",
+            "--wait-interval-seconds", "30",
+        ])
+        return str(self._data(data).get("id"))
+
     def create_data_safe_target(
         self,
         compartment_id: str,
