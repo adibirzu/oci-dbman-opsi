@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from dbman_opsi.config import EnablementConfig, Target
 from dbman_opsi.oci_cli import OciCli
 
@@ -96,9 +98,29 @@ def cloud_modify_command(target: Target) -> list[str]:
     ]
 
 
+# Markers that mean Ops Insights does not yet see the database after Database
+# Management was just enabled — a propagation race, not a permanent error. The
+# managed database takes a short while to register before OPSI can attach.
+OPSI_PROPAGATION_MARKERS = (
+    "Provided database resource",
+    "details were missing",
+    "MissingParameter",
+)
+
+
 class EnablementService:
-    def __init__(self, oci: OciCli) -> None:
+    def __init__(
+        self,
+        oci: OciCli,
+        *,
+        opsi_create_attempts: int = 5,
+        opsi_create_delay: float = 30.0,
+        sleeper=time.sleep,
+    ) -> None:
         self.oci = oci
+        self.opsi_create_attempts = opsi_create_attempts
+        self.opsi_create_delay = opsi_create_delay
+        self._sleep = sleeper
 
     def enable_all(self, config: EnablementConfig, force_reconcile: bool = False) -> None:
         for target in config.targets:
@@ -301,10 +323,26 @@ class EnablementService:
         if target.opsi_connection_details_file:
             args.extend(["--connection-details", f"file://{target.opsi_connection_details_file}"])
         # Tolerate a 409 "already exists" so a flaky active-check that fell through
-        # does not fail the run when the insight is in fact present.
-        created = self.oci.run_tolerating(args, tolerated=("already exists",))
-        if not created:
-            print(f"Ops Insights insight already exists for {target.name}; left as-is")
+        # does not fail the run when the insight is in fact present. Retry on the
+        # post-enable propagation race ("database resource details were missing"):
+        # right after DBM is enabled, the managed database is not yet visible to
+        # Ops Insights, so the create is rejected until registration completes.
+        for attempt in range(self.opsi_create_attempts):
+            try:
+                created = self.oci.run_tolerating(args, tolerated=("already exists",))
+                if not created:
+                    print(f"Ops Insights insight already exists for {target.name}; left as-is")
+                return
+            except RuntimeError as exc:
+                is_propagation = any(marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS)
+                if is_propagation and attempt < self.opsi_create_attempts - 1:
+                    print(
+                        f"Ops Insights not ready for {target.name} (database registering); "
+                        f"retry {attempt + 1}/{self.opsi_create_attempts - 1}"
+                    )
+                    self._sleep(self.opsi_create_delay)
+                    continue
+                raise
 
     def _print_external_next_step(self, target: Target) -> None:
         print(f"External target {target.name}: run generated Management Agent script, then rerun validate.")
