@@ -251,6 +251,65 @@ class OciCli:
             insight_id,
         ]))
 
+    # --- Data Safe (security pillar) ---
+
+    def list_data_safe_targets(self, compartment_id: str) -> list[dict[str, Any]]:
+        """List registered Data Safe target databases in a compartment.
+
+        Data Safe registration is a standalone ``target-database`` resource, not
+        a status field on the DB, so detection means listing these and matching
+        each back to a discovered database by OCID.
+        """
+
+        data = self.run_json([
+            "data-safe", "target-database", "list",
+            "--compartment-id", compartment_id, "--all",
+        ])
+        return self._items(data)
+
+    def get_data_safe_target(self, target_database_id: str) -> dict[str, Any]:
+        return self._data(self.run_json([
+            "data-safe", "target-database", "get",
+            "--target-database-id", target_database_id,
+        ]))
+
+    def list_data_safe_private_endpoints(self, compartment_id: str) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "data-safe", "private-endpoint", "list",
+            "--compartment-id", compartment_id, "--all",
+        ])
+        return self._items(data)
+
+    def create_data_safe_target(
+        self,
+        compartment_id: str,
+        display_name: str,
+        database_details_file: str,
+        connection_option_file: str | None = None,
+        credentials_file: str | None = None,
+    ) -> str:
+        """Register a Data Safe target database, returning its OCID.
+
+        ``*_file`` arguments are paths to JSON payloads (passed as ``file://``)
+        so secrets never appear on the command line. Idempotent: if a target with
+        ``display_name`` already exists in the compartment, its OCID is returned.
+        """
+
+        for existing in self.list_data_safe_targets(compartment_id):
+            if existing.get("display-name") == display_name:
+                return str(existing.get("id"))
+        args = [
+            "data-safe", "target-database", "create",
+            "--compartment-id", compartment_id,
+            "--display-name", display_name,
+            "--database-details", f"file://{database_details_file}",
+        ]
+        if connection_option_file:
+            args.extend(["--connection-option", f"file://{connection_option_file}"])
+        if credentials_file:
+            args.extend(["--credentials", f"file://{credentials_file}"])
+        return str(self._data(self.run_json(args)).get("id"))
+
     # --- Database Management named & preferred credentials ---
 
     def list_managed_databases(self, compartment_id: str) -> list[dict[str, Any]]:

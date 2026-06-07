@@ -29,6 +29,18 @@ def test_redacts_nested_data_without_mutating_shape() -> None:
     assert redact_data(data) == {"items": ["<OCI_OCID>"], "ok": True}
 
 
+def test_redacts_data_safe_and_pluggable_database_ocids() -> None:
+    ds_target = "ocid1" + ".datasafetargetdatabase.oc1.eu-frankfurt-1.aaaaexample"
+    ds_pe = "ocid1" + ".datasafeprivateendpoint.oc1.eu-frankfurt-1.bbbbexample"
+    pdb = "ocid1" + ".pluggabledatabase.oc1.eu-frankfurt-1.ccccexample"
+    insight = "ocid1" + ".databaseinsight.oc1.eu-frankfurt-1.ddddexample"
+
+    redacted = redact_text(f"{ds_target} {ds_pe} {pdb} {insight}")
+
+    assert "ocid1" + "." not in redacted
+    assert redacted.count("<OCI_OCID>") == 4
+
+
 @pytest.fixture(autouse=True)
 def _synthetic_namespace_redaction(monkeypatch):
     import hashlib
