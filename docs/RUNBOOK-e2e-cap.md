@@ -214,10 +214,26 @@ Automation"). User launches Chrome with `--remote-debugging-port=9222
 --user-data-dir=~/.oci-cdp-profile`, logs in normally, then
 `~/oci-cli/bin/python /tmp/oci_cdp_capture.py` connects over CDP and screenshots.
 
-Working console routes (eu-frankfurt-1): DB systems `/dbaas/dbsystems`,
-Ops Insights overview `/opsi/database-insights`. DBM and per-resource detail pages
-are SPA routes that redirect when deep-linked — navigate via the console menu and
-screenshot the DBMOPSI/PDB1 detail pages (now showing **Monitoring: UP**).
+Working console route (eu-frankfurt-1): Managed Databases lives at
+`/dbmgmt-ui/administration/managed_databases` (NOT `/dbmgmt/managed-databases`).
+The console is an Oracle JET SPA that renders list rows and much content in
+**shadow DOM**, so Playwright `get_by_role`/`get_by_text` clicks and `a[href]`
+discovery do not reach them — drive by navigating the menu yourself (CDP attach to
+your own logged-in Chrome) and screenshot the current tab, rather than automating
+clicks. Automation-*launched* Chrome also hits the SSO/MFA wall; CDP-attach to a
+real logged-in browser is the reliable path.
 
-Raw captures go to `docs/screenshots/raw/` (gitignored). Redact OCIDs / tenancy
-name / db_unique_name / DB IDs (crop or blur) before committing any version.
+Committed (redacted) screenshots in `docs/screenshots/`:
+
+- `console-01-managed-databases.png` — DBMOPSI (Container DB) + PDB1 (Pluggable DB)
+  **Enabled / Full**, ADVANCED.
+- `console-02-dbmopsi-summary.png` — DBMOPSI **Available**; Performance Hub / ADDM
+  Spotlight / AWR Explorer accessible (no privilege prompt); monitoring timeline
+  all-green.
+- `console-03-dbmopsi-pdbs.png` — PDBs tab: PDB1 **Up** with live Performance Hub
+  metrics; full Performance/Tuning nav.
+
+Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/account
+name and emails; for operator-pasted images, sensitive bands (header
+region/account/avatar, compartment chip) are Gaussian-blurred with PIL. Raw captures
+go to `docs/screenshots/raw/` (gitignored) — only redacted images are committed.
