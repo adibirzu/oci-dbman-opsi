@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 from dbman_opsi.agent_scripts import generate_agent_scripts
-from dbman_opsi.config import load_config, save_config
+from dbman_opsi.config import EnablementConfig, load_config, save_config
 from dbman_opsi.credentials import CredentialService
+from dbman_opsi.datasafe import DataSafeDecision, DataSafeService
 from dbman_opsi.db_check import parse_validation_output
+from dbman_opsi.db_exec import DbExecService
 from dbman_opsi.db_scripts import generate_db_scripts
 from dbman_opsi.discovery import DiscoveryService
 from dbman_opsi.doctor import check_environment, check_session, summarize_checks
@@ -126,7 +131,57 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--profile", help="Also verify the OCI session is authenticated for this profile")
     doctor.add_argument("--region", help="Region to use for the session check")
 
+    db_exec = subcommands.add_parser(
+        "db-exec",
+        help="Generate DB-side scripts and show the hybrid run plan (auto-run in non-prod, handoff in prod)",
+    )
+    db_exec.add_argument("--config", default="dbman-opsi.yaml")
+    db_exec.add_argument("--scripts-dir", default="generated/db-scripts")
+    db_exec.add_argument("--force", action="store_true", help="Treat as non-production (plan auto-exec even for prod)")
+
+    data_safe = subcommands.add_parser(
+        "data-safe",
+        help="Register databases as Data Safe targets (security pillar) for targets that opt into 'datasafe'",
+    )
+    data_safe.add_argument("--config", default="dbman-opsi.yaml")
+    data_safe.add_argument("--apply", action="store_true", help="Perform live registration (otherwise dry-run)")
+    data_safe.add_argument("--user", help="Data Safe service account (default: target monitoring_user or DBSNMP)")
+    data_safe.add_argument("--password-env", help="Env var holding the Data Safe account password (non-interactive)")
+
     return parser
+
+
+def _data_safe_credential_provider(args: argparse.Namespace):
+    """Build a (user, password) provider for Data Safe registration.
+
+    Only prompts when applying live; in dry-run the password is unused. A
+    ``--password-env`` value supports non-interactive runs (CI/Cloud Shell).
+    """
+
+    def provider(target) -> tuple[str, str]:
+        user = args.user or target.monitoring_user or "DBSNMP"
+        if not args.apply:
+            return (user, "")
+        if args.password_env:
+            return (user, os.environ.get(args.password_env, ""))
+        return (user, getpass.getpass(f"Data Safe password for {user}@{target.name}: "))
+
+    return provider
+
+
+def _persist_data_safe_targets(
+    config: EnablementConfig, decisions: list[DataSafeDecision]
+) -> EnablementConfig:
+    """Write any newly-registered Data Safe target OCIDs back into the config."""
+
+    ids = {d.target: d.target_id for d in decisions if d.target_id}
+    if not ids:
+        return config
+    new_targets = tuple(
+        replace(t, data_safe_target_id=ids[t.name]) if t.name in ids and not t.data_safe_target_id else t
+        for t in config.targets
+    )
+    return replace(config, targets=new_targets)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -281,6 +336,35 @@ def main(argv: list[str] | None = None) -> int:
         for path in paths:
             print(path)
         return 0
+
+    if args.command == "db-exec":
+        config = load_config(args.config)
+        # Regenerate scripts so the plan reflects the current config, then show the
+        # per-target run plan. Actual auto-execution against the DB runs through the
+        # Bastion procedure / handoff packet (see generated <target>/HANDOFF.md).
+        generate_db_scripts(config, Path(args.scripts_dir))
+        decisions = DbExecService().plan(config, force=args.force)
+        for decision in decisions:
+            print(f"- db-exec {decision.target}: {decision.action} ({decision.detail})")
+        return 0
+
+    if args.command == "data-safe":
+        config = load_config(args.config)
+        # Reads (list targets/PEs for idempotency) must be live; writes respect
+        # --apply via the runner so a dry-run prints commands without registering.
+        runner = CommandRunner(dry_run=not args.apply)
+        oci = OciCli(config.profile, config.region, runner)
+        service = DataSafeService(oci, credential_provider=_data_safe_credential_provider(args))
+        decisions = service.enable_all(config)
+        for decision in decisions:
+            print(f"- data-safe {decision.target}: {decision.status} ({decision.detail})")
+        if args.apply:
+            updated = _persist_data_safe_targets(config, decisions)
+            if updated is not config:
+                save_config(args.config, updated)
+                print(f"Updated Data Safe target OCIDs in {args.config}")
+        blocked = [decision for decision in decisions if decision.status == "blocked"]
+        return 1 if blocked else 0
 
     raise ValueError(f"Unhandled command {args.command}")
 

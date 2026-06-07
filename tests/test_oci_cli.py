@@ -138,3 +138,60 @@ def test_list_opsi_insights_complete_flag_true_when_all_states_answer() -> None:
 
     assert [i["id"] for i in insights] == ["ins-1"]
     assert complete is True
+
+
+def test_oci_cli_data_safe_list_and_get_command_shapes() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_data_safe_targets("compartment-id") == []
+    assert oci.list_data_safe_private_endpoints("compartment-id") == []
+
+    runner_get = FakeRunner('{"data": {"id": "dst-1"}}')
+    oci_get = OciCli("cap", "eu-frankfurt-1", runner_get)  # type: ignore[arg-type]
+    assert oci_get.get_data_safe_target("dst-1") == {"id": "dst-1"}
+    cmd = runner_get.commands[0]
+    assert cmd[5:9] == ["data-safe", "target-database", "get", "--target-database-id"]
+
+
+def test_oci_cli_create_data_safe_target_is_idempotent_by_name(tmp_path) -> None:
+    runner = FakeRunner('{"data": [{"id": "existing", "display-name": "dbmopsi"}]}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    details = tmp_path / "d.json"
+    details.write_text("{}")
+
+    # An existing target with the same display name short-circuits creation.
+    target_id = oci.create_data_safe_target("compartment-id", "dbmopsi", str(details))
+    assert target_id == "existing"
+    # Only the list call happened, no create.
+    assert all("create" not in cmd for cmd in runner.commands)
+
+
+def test_oci_cli_create_data_safe_target_builds_create_command(tmp_path) -> None:
+    runner = FakeRunner('{"data": {"id": "new-target"}}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    details = tmp_path / "d.json"
+    conn = tmp_path / "c.json"
+    creds = tmp_path / "cr.json"
+    for f in (details, conn, creds):
+        f.write_text("{}")
+
+    target_id = oci.create_data_safe_target(
+        "compartment-id", "newdb", str(details), str(conn), str(creds)
+    )
+    assert target_id == "new-target"
+    create_cmd = runner.commands[-1]
+    assert create_cmd[5:8] == ["data-safe", "target-database", "create"]
+    assert f"file://{details}" in create_cmd
+    assert f"file://{conn}" in create_cmd
+    assert f"file://{creds}" in create_cmd
+
+
+def test_oci_cli_create_data_safe_private_endpoint_idempotent() -> None:
+    runner = FakeRunner('{"data": [{"id": "pe-existing", "display-name": "dbmopsi-datasafe-pe"}]}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    pe = oci.create_data_safe_private_endpoint(
+        "compartment-id", "dbmopsi-datasafe-pe", "vcn-1", "subnet-1"
+    )
+    assert pe == "pe-existing"
+    assert all("create" not in cmd for cmd in runner.commands)

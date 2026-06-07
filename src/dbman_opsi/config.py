@@ -59,6 +59,9 @@ class Target:
     provision: bool = False
     external_host: str | None = None
     external_os: Literal["linux", "windows", "solaris", "aix"] | None = None
+    # Parent DB system OCID (Base DB / Exadata). Data Safe's DATABASE_CLOUD_SERVICE
+    # registration keys off the DB system + service name rather than the DB OCID.
+    db_system_id: str | None = None
     # Data Safe: the registered target-database is a separate resource keyed back
     # to this DB; its Data Safe private endpoint lives in the DB subnet.
     data_safe_target_id: str | None = None

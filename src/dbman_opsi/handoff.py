@@ -59,7 +59,7 @@ def _data_safe_context(target: Target) -> str:
 After `06-enable-data-safe.sql` runs, register the database as a Data Safe target:
 
 ```bash
-dbman-opsi data-safe enable --config <config>
+dbman-opsi data-safe --config <config> --apply
 ```
 
 For Data Masking / Data Discovery, also download and run the per-target privilege
