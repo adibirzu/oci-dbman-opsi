@@ -5,6 +5,7 @@ from dbman_opsi.db_scripts import (
     advanced_grants_sql,
     generate_db_scripts,
     monitoring_user_sql,
+    performance_hub_sql,
     validation_sql,
 )
 
@@ -38,6 +39,40 @@ def test_advanced_grants_include_performance_hub_privileges() -> None:
     assert "grant execute on sys.dbms_workload_repository to &monitoring_user" in sql
     assert "grant select any dictionary to &monitoring_user" in sql
     assert "grant select_catalog_role to &monitoring_user" in sql
+
+
+def test_advanced_grants_include_sql_tuning_set_privilege() -> None:
+    # ORA-13750: creating a SQL Tuning Set from Performance Hub needs this grant.
+    sql = advanced_grants_sql(Target(kind="dbcs", name="db1", monitoring_user="DBSNMP")).lower()
+    assert "grant administer sql tuning set to &monitoring_user" in sql
+    assert "grant administer any sql tuning set to &monitoring_user" in sql
+
+
+def test_performance_hub_sql_enables_awr_autoflush_for_cdb() -> None:
+    # CDB target: set the instance master switch; no PDB snapshot-interval call.
+    sql = performance_hub_sql(Target(kind="dbcs", name="cdb", database_role="CDB")).lower()
+    assert "alter system set awr_pdb_autoflush_enabled = true scope = both" in sql
+    assert "modify_snapshot_settings" not in sql
+
+
+def test_performance_hub_sql_sets_pdb_snapshot_interval_and_seeds() -> None:
+    # PDB target: autoflush + non-zero snapshot interval + an initial snapshot,
+    # so ADDM Spotlight / AWR Explorer have PDB-level data.
+    sql = performance_hub_sql(
+        Target(kind="dbcs", name="pdb1", database_role="PDB", service_name="PDB1")
+    ).lower()
+    assert "awr_pdb_autoflush_enabled = true" in sql
+    assert "modify_snapshot_settings(interval => 60, retention => 11520)" in sql
+    assert "create_snapshot" in sql
+
+
+def test_generate_db_scripts_includes_performance_hub_script(tmp_path: Path) -> None:
+    config = EnablementConfig(
+        profile="DEFAULT", region="eu-frankfurt-1",
+        targets=(Target(kind="dbcs", name="cdb", database_role="CDB"),),
+    )
+    paths = generate_db_scripts(config, tmp_path)
+    assert any(p.name == "05-enable-performance-hub.sql" for p in paths)
 
 
 def test_validation_sql_checks_performance_hub_privileges() -> None:
