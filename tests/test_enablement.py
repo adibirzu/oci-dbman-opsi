@@ -389,3 +389,66 @@ def test_enable_rejects_unknown_target_kind() -> None:
         assert "Unsupported" in str(exc)
     else:
         raise AssertionError("Expected ValueError")
+
+
+class _OpsiCreateOci:
+    """Fake whose OPSI create raises a propagation error N times, then succeeds."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.fail_times = fail_times
+        self.create_calls = 0
+
+    def get_opsi_database_insight(self, insight_id):  # not used (no insight id)
+        return {}
+
+    def list_opsi_database_insights(self, compartment_id):
+        return []
+
+    def run(self, args):
+        return None
+
+    def run_tolerating(self, args, tolerated):
+        # Only the OPSI create-pe path reaches here in this test.
+        self.create_calls += 1
+        if self.create_calls <= self.fail_times:
+            raise RuntimeError("400-MissingParameter, Provided database resource details were missing.")
+        return True
+
+
+def test_opsi_create_retries_on_propagation_then_succeeds() -> None:
+    from dbman_opsi.config import Target
+
+    oci = _OpsiCreateOci(fail_times=2)
+    sleeps: list[float] = []
+    service = EnablementService(
+        oci, opsi_create_attempts=5, opsi_create_delay=0.0, sleeper=lambda d: sleeps.append(d)
+    )  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs", name="cdb", compartment_id="cmpt", resource_id="db-1",
+        service_name="svc", private_endpoint_id="dbmpe", opsi_private_endpoint_id="opsipe",
+        opsi_credential_details_file="cred.json", database_resource_type="database",
+    )
+
+    # Should retry past the 2 propagation failures and succeed on the 3rd attempt.
+    service._create_opsi_pe_comanaged(target)
+    assert oci.create_calls == 3
+    assert len(sleeps) == 2
+
+
+def test_opsi_create_raises_after_exhausting_propagation_retries() -> None:
+    from dbman_opsi.config import Target
+
+    oci = _OpsiCreateOci(fail_times=99)
+    service = EnablementService(oci, opsi_create_attempts=3, opsi_create_delay=0.0, sleeper=lambda d: None)  # type: ignore[arg-type]
+    target = Target(
+        kind="dbcs", name="cdb", compartment_id="cmpt", resource_id="db-1",
+        service_name="svc", private_endpoint_id="dbmpe", opsi_private_endpoint_id="opsipe",
+        opsi_credential_details_file="cred.json", database_resource_type="database",
+    )
+    try:
+        service._create_opsi_pe_comanaged(target)
+    except RuntimeError as exc:
+        assert "database resource" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError after retries exhausted")
+    assert oci.create_calls == 3
