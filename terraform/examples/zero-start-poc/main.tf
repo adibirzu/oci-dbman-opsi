@@ -110,7 +110,7 @@ resource "oci_kms_vault" "test" {
 resource "oci_database_db_system" "dbcs" {
   for_each            = local.provision_dbcs
   compartment_id      = var.compartment_ocid
-  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain_index].name
   subnet_id           = local.selected_subnet_id
   display_name        = each.value.name
   shape               = var.dbcs_shape
@@ -118,6 +118,15 @@ resource "oci_database_db_system" "dbcs" {
   ssh_public_keys     = var.ssh_public_keys
   license_model       = "LICENSE_INCLUDED"
   node_count          = 1
+  # When the subnet has no DNS label, the DB system launch requires an explicit
+  # network domain ("domain name cannot be null"). Reuse the subnet's existing
+  # DB domain. null lets the provider derive it from a DNS-enabled subnet.
+  domain                  = var.dbcs_domain
+  # Flex shapes (e.g. VM.Standard.E4.Flex) require an explicit core count, and a
+  # VM DB system requires a data storage size. Without these, apply fails with a
+  # missing-required-attribute error.
+  cpu_core_count          = var.dbcs_cpu_core_count
+  data_storage_size_in_gb = var.dbcs_data_storage_gb
   hostname            = substr(replace(lower(each.value.name), "/[^a-z0-9]/", ""), 0, 12)
 
   db_home {

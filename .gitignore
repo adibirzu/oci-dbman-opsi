@@ -27,3 +27,6 @@ firebase-debug.log
 .oci-cdp-profile/
 pytest-of-*/
 *-of-abirzu/
+terraform/**/*.auto.tfvars.json
+terraform/**/*.auto.tfvars
+terraform/**/*.tfvars
