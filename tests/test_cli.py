@@ -179,7 +179,7 @@ def test_cli_configure_db_side_only_uses_handoff_mode(tmp_path: Path, monkeypatc
     captured: dict[str, object] = {}
 
     class FakeConfigure:
-        def __init__(self, oci, enablement=None) -> None:
+        def __init__(self, oci, enablement=None, datasafe=None) -> None:
             pass
 
         def configure(self, config, mode="plan", handoff_dir="x", force=False):
@@ -244,7 +244,7 @@ def test_cli_configure_blocked_returns_nonzero(tmp_path: Path, monkeypatch) -> N
     _save_basic_config(config_path)
 
     class FakeConfigure:
-        def __init__(self, oci, enablement=None) -> None:
+        def __init__(self, oci, enablement=None, datasafe=None) -> None:
             pass
 
         def configure(self, config, mode="plan", handoff_dir="x", force=False):

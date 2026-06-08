@@ -109,6 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--force", action="store_true", help="Ignore blocking prerequisite failures")
     configure.add_argument("--output", default="generated/handoff", help="Handoff packet output directory")
     configure.add_argument("--json", action="store_true", help="Emit the report as JSON")
+    configure.add_argument(
+        "--with-data-safe",
+        action="store_true",
+        help="Also register Data Safe targets (datasafe pillar) during --apply",
+    )
+    configure.add_argument("--data-safe-user", help="Data Safe service account (default: target monitoring_user or DBSNMP)")
+    configure.add_argument("--data-safe-password-env", help="Env var holding the Data Safe account password (non-interactive)")
 
     agent = subcommands.add_parser("generate-agent-scripts", help="Generate Management Agent install scripts")
     agent.add_argument("--config", default="dbman-opsi.yaml")
@@ -152,19 +159,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _data_safe_credential_provider(args: argparse.Namespace):
+def _make_data_safe_provider(apply: bool, user_override: str | None, password_env: str | None):
     """Build a (user, password) provider for Data Safe registration.
 
     Only prompts when applying live; in dry-run the password is unused. A
-    ``--password-env`` value supports non-interactive runs (CI/Cloud Shell).
+    password env var supports non-interactive runs (CI/Cloud Shell).
     """
 
     def provider(target) -> tuple[str, str]:
-        user = args.user or target.monitoring_user or "DBSNMP"
-        if not args.apply:
+        user = user_override or target.monitoring_user or "DBSNMP"
+        if not apply:
             return (user, "")
-        if args.password_env:
-            return (user, os.environ.get(args.password_env, ""))
+        if password_env:
+            return (user, os.environ.get(password_env, ""))
         return (user, getpass.getpass(f"Data Safe password for {user}@{target.name}: "))
 
     return provider
@@ -307,7 +314,15 @@ def main(argv: list[str] | None = None) -> int:
         # Reads are always live (read-only); only the enable write respects the mode.
         read_oci = OciCli(config.profile, config.region, CommandRunner(dry_run=False))
         write_oci = OciCli(config.profile, config.region, CommandRunner(dry_run=mode != "apply"))
-        service = ConfigureService(read_oci, EnablementService(write_oci))
+        datasafe = None
+        if args.with_data_safe and any(target.wants("datasafe") for target in config.targets):
+            datasafe = DataSafeService(
+                write_oci,
+                credential_provider=_make_data_safe_provider(
+                    mode == "apply", args.data_safe_user, args.data_safe_password_env
+                ),
+            )
+        service = ConfigureService(read_oci, EnablementService(write_oci), datasafe=datasafe)
         report: ConfigureReport = service.configure(
             config, mode=mode, handoff_dir=args.output, force=args.force
         )
@@ -355,7 +370,9 @@ def main(argv: list[str] | None = None) -> int:
         # --apply via the runner so a dry-run prints commands without registering.
         runner = CommandRunner(dry_run=not args.apply)
         oci = OciCli(config.profile, config.region, runner)
-        service = DataSafeService(oci, credential_provider=_data_safe_credential_provider(args))
+        service = DataSafeService(
+            oci, credential_provider=_make_data_safe_provider(args.apply, args.user, args.password_env)
+        )
         decisions = service.enable_all(config)
         for decision in decisions:
             print(f"- data-safe {decision.target}: {decision.status} ({decision.detail})")
