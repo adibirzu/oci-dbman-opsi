@@ -326,22 +326,29 @@ Committed (redacted) screenshots in `docs/screenshots/`:
   all-green.
 - `console-03-dbmopsi-pdbs.png` — PDBs tab: PDB1 **Up** with live Performance Hub
   metrics; full Performance/Tuning nav.
+- `console-04-data-safe-targets.png` — Data Safe **Target databases**: the three
+  registered targets (`dbman-opsi-dbcs-PDB1`, `dbman-opsi-dbcs2-cdb`,
+  `dbman-opsi-dbcs2-PDB1`) all **Active**.
+- `console-05-performance-hub.png` — Performance Hub: Activity Summary / Average
+  Active Sessions + ASH Analytics (SQL-detail tables blurred — live SQL/service/users).
+
+The Managed Databases (`console-01`) and fleet (`console-02`) views now show **both**
+DB systems — the original `DBMOPSI`/`PDB1` and the freshly-provisioned
+`dbmanops`/`dbmanops_pdb1` — all Enabled/Full.
 
 Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/account
 name and emails; for operator-pasted images, sensitive bands (header
 region/account/avatar, compartment chip) are Gaussian-blurred with PIL. Raw captures
 go to `docs/screenshots/raw/` (gitignored) — only redacted images are committed.
 
-### Pending: Data Safe Console view (operator capture)
+### Capturing more Console views (CDP-attach recipe)
 
-A Data Safe screenshot is the one remaining showcase asset. It needs a live,
-logged-in browser (the extension policy blocks automation), so capture it with the
-same **CDP-attach** procedure above and add a redacted
-`console-04-data-safe-targets.png`:
-
-1. Console → **Oracle Data Safe** → **Target databases** (region eu-frankfurt-1).
-2. Show the registered target(s) **Active** (e.g. `dbman-opsi-dbcs-PDB1`,
-   `dbman-opsi-dbcs2-cdb`, `dbman-opsi-dbcs2-PDB1`) and, optionally, a
-   **Security Assessment** summary for one target.
-3. Redact OCIDs / IPs / tenancy / db_unique_name+domain (blur the header band and
-   any service strings) before committing; raw → `docs/screenshots/raw/`.
+The Data Safe and Performance Hub views (`console-04`/`05`) were captured with the
+CDP-attach flow above and are committed. The OCI Console is a JET SPA whose left-nav
+and list rows live in **shadow DOM**, so Playwright/JS clicks do not reach them —
+the reliable recipe is: **you** navigate the menu in the logged-in CDP Chrome, then a
+small `connect_over_cdp` helper screenshots the current tab to
+`docs/screenshots/raw/`, and a PIL pass blurs the region/account band, compartment
+chip, and any SQL/service/user tables before committing. To add a **Security
+Assessment** view, open Data Safe → a target → Security Assessment and capture it the
+same way.

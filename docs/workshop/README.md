@@ -198,6 +198,42 @@ For Data Masking / Data Discovery, also run the per-target privilege script from
 the OCI Console (Data Safe > Target databases > Register > Download Privilege
 Script).
 
+## What success looks like (OCI Console)
+
+These redacted captures (region/account band and compartment chip blurred) show the
+end state after the labs — two Base Database systems (`DBMOPSI`/`PDB1` and a
+freshly-provisioned `dbmanops`/`dbmanops_pdb1`) with all three pillars on.
+
+**Database Management — Managed Databases** (Lab 5). Both container DBs and their
+PDBs show **Enabled / Full** under ADVANCED management:
+
+![Managed Databases](../screenshots/console-01-managed-databases.png)
+
+**Diagnostics & Management — fleet summary** (Lab 5). All managed databases with
+live CPU / storage / Average-Active-Sessions metrics:
+
+![Fleet diagnostics summary](../screenshots/console-02-dbmopsi-summary.png)
+
+**Database summary — Pluggable Databases tab** (Lab 5). `PDB1` **Up** with live
+Performance Hub metrics; the *Performance Hub / ADDM Spotlight / AWR Explorer*
+actions are available (no privilege prompt, thanks to scripts `03`/`05`):
+
+![DBMOPSI PDBs](../screenshots/console-03-dbmopsi-pdbs.png)
+
+**Operations Insights — Performance Hub** (Lab 5). Activity Summary / Average
+Active Sessions with ASH Analytics (SQL-detail tables blurred — they contain live
+SQL, service names, and users):
+
+![Performance Hub](../screenshots/console-05-performance-hub.png)
+
+**Data Safe — Target databases** (Lab 6). The registered targets are **Active**
+(`dbman-opsi-dbcs-PDB1`, `dbman-opsi-dbcs2-cdb`, `dbman-opsi-dbcs2-PDB1`):
+
+![Data Safe target databases](../screenshots/console-04-data-safe-targets.png)
+
+`discover --json` corroborates the Console: each enabled DB reports
+`dbm_status: ENABLED`, `opsi_status: ENABLED`, and `data_safe_status: ENABLED`.
+
 ## Resource Manager Path
 
 Use the Deploy to Oracle Cloud button in the repository README to launch the Terraform stack in any tenant. Resource Manager provisions only OCI-side prerequisites. Database credentials and database-side SQL execution remain explicit workshop steps.
