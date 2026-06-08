@@ -452,3 +452,41 @@ def test_opsi_create_raises_after_exhausting_propagation_retries() -> None:
     else:
         raise AssertionError("expected RuntimeError after retries exhausted")
     assert oci.create_calls == 3
+
+
+class _DbmWaitOci:
+    """Fake whose DBM status reads ENABLING then ENABLED after a poll."""
+
+    def __init__(self, statuses):
+        self._statuses = list(statuses)
+        self.get_calls = 0
+
+    def get_database(self, database_id):
+        self.get_calls += 1
+        st = self._statuses[min(self.get_calls - 1, len(self._statuses) - 1)]
+        return {"database-management-config": {"management-status": st}}
+
+
+def test_wait_dbm_enabled_polls_until_enabled() -> None:
+    from dbman_opsi.config import Target
+
+    oci = _DbmWaitOci(["ENABLING", "ENABLING", "ENABLED"])
+    sleeps: list[float] = []
+    service = EnablementService(oci, sleeper=lambda d: sleeps.append(d))  # type: ignore[arg-type]
+    service.dbm_wait_attempts = 5
+    service.dbm_wait_delay = 0.0
+    target = Target(kind="dbcs", name="cdb", resource_id="db-1", database_role="CDB")
+
+    service._wait_dbm_enabled(target)
+    assert oci.get_calls == 3          # polled until ENABLED
+    assert len(sleeps) == 2            # slept between the two ENABLING reads
+
+
+def test_wait_dbm_enabled_is_best_effort_when_unreadable() -> None:
+    from dbman_opsi.config import Target
+
+    class _Blind:
+        pass  # no get_database -> AttributeError, wait returns immediately
+
+    service = EnablementService(_Blind(), sleeper=lambda d: None)  # type: ignore[arg-type]
+    service._wait_dbm_enabled(Target(kind="dbcs", name="cdb", resource_id="db-1"))  # must not raise

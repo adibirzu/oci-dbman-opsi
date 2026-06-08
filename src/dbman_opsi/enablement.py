@@ -6,6 +6,7 @@ import time
 
 from dbman_opsi.config import EnablementConfig, Target
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.status import dbm_status
 
 CLOUD_REQUIRED_FIELDS = ("resource_id", "password_secret_id", "private_endpoint_id", "service_name", "monitoring_user")
 
@@ -121,6 +122,11 @@ class EnablementService:
         self.opsi_create_attempts = opsi_create_attempts
         self.opsi_create_delay = opsi_create_delay
         self._sleep = sleeper
+        # Bounded wait for DBM to finish ENABLING before attempting OPSI, so the
+        # managed database is registered and Ops Insights can attach on the first
+        # try (the OPSI create retry above remains as a backstop).
+        self.dbm_wait_attempts = 20
+        self.dbm_wait_delay = 15.0
 
     def enable_all(self, config: EnablementConfig, force_reconcile: bool = False) -> None:
         for target in config.targets:
@@ -185,7 +191,39 @@ class EnablementService:
             else:
                 print(f"Database Management already enabled for {target.name}; reconciling connection")
                 self.oci.run(cloud_modify_command(target))
+        elif applied:
+            # Freshly enabled: wait until DBM reports ENABLED (managed database
+            # registered) before attaching Ops Insights, to avoid the propagation
+            # race ("Provided database resource details were missing").
+            self._wait_dbm_enabled(target)
         self._enable_opsi_pe_comanaged_if_ready(target)
+
+    def _wait_dbm_enabled(self, target: Target) -> None:
+        """Poll until the target's Database Management status is ENABLED.
+
+        Best-effort: an unreadable status (no getter / transient error) returns
+        immediately and lets the OPSI create retry handle any remaining race.
+        """
+
+        if not target.resource_id:
+            return
+        for attempt in range(self.dbm_wait_attempts):
+            try:
+                if target.database_role == "PDB":
+                    details = self.oci.get_pluggable_database(target.resource_id)
+                else:
+                    details = self.oci.get_database(target.resource_id)
+            except (RuntimeError, AttributeError):
+                return
+            status = str(dbm_status(details, target.kind, target.database_role) or "").upper()
+            # Done once strictly ENABLED (the managed database is registered).
+            # Only keep waiting while it is actively ENABLING; any other/unknown
+            # status returns immediately (best-effort — the OPSI create retry is
+            # the backstop, and this avoids busy-waiting on a non-progressing read).
+            if status != "ENABLING":
+                return
+            if attempt < self.dbm_wait_attempts - 1:
+                self._sleep(self.dbm_wait_delay)
 
     def _dbm_monitoring_healthy(self, target: Target) -> bool:
         """True when the managed database reports an UP monitoring status.
