@@ -25,6 +25,11 @@ Start the wizard and choose an existing compartment, VCN, subnet, and database t
 dbman-opsi plan --profile <OCI_PROFILE> --region <OCI_REGION> --output dbman-opsi.local.yaml
 ```
 
+For each target the wizard asks **which pillars to enable** — `dbm` (Database
+Management), `opsi` (Operations Insights), and/or `datasafe` (Data Safe). The
+default is `dbm`+`opsi`; add `datasafe` to also register the database as a Data
+Safe target (Lab 6). PDB targets inherit their parent CDB's pillar selection.
+
 For DBCS, select the target database and keep the monitoring user as `DBSNMP` unless your policy requires a custom user.
 
 For Autonomous Database, choose the existing Autonomous Database resource. Database Management and Operations Insights can be validated directly from OCI status.
@@ -84,15 +89,28 @@ Generate database SQL scripts:
 dbman-opsi generate-db-scripts --config dbman-opsi.local.yaml --output generated/db-scripts
 ```
 
-Run the scripts on DBCS or Exadata with SQLcl or SQL*Plus as an administrative user:
+Run the scripts on DBCS or Exadata with SQLcl or SQL*Plus as an administrative
+user, in this order (validate runs last so it confirms the grants):
 
 ```sql
 @01-create-monitoring-user.sql
 @02-grant-basic-monitoring.sql
+@03-grant-advanced-diagnostics.sql   -- optional: Performance Hub + SQL Tuning Set privileges
+@05-enable-performance-hub.sql       -- optional: AWR autoflush so PDB ADDM Spotlight / AWR Explorer collect data
 @04-validate-monitoring-user.sql
+@06-enable-data-safe.sql             -- only when the target opts into the 'datasafe' pillar
 ```
 
-Use `03-grant-advanced-diagnostics.sql` only after reviewing local security and licensing policy.
+`03` and `05` exercise the Diagnostics/Tuning Pack — review licensing first. `05`
+is required for PDB-level ADDM Spotlight / AWR Explorer to show data (run it for
+the CDB and each PDB). `06` is generated only when the target includes `datasafe`.
+
+Instead of running these by hand, `db-exec` shows the **hybrid plan** and (in
+non-production tenancies) can drive them via Bastion:
+
+```bash
+dbman-opsi db-exec --config dbman-opsi.local.yaml   # generate scripts + show auto-run vs handoff plan
+```
 
 ## Lab 5: Enable And Validate Collection
 
@@ -133,7 +151,42 @@ Validate:
 dbman-opsi validate --config dbman-opsi.local.yaml
 ```
 
-The validation output should show Database Management enabled and Operations Insights enabled or ready for Database Insight validation.
+The validation output shows, per target, Database Management enabled and the real
+Operations Insights Database Insight lifecycle — `ACTIVE (ENABLED)` when
+collecting, or `FAILED`/`NOT_FOUND`/`UNKNOWN`. `validate` reads the insight by
+OCID (reliable) and never reports a false `NOT_FOUND` from the flaky list, so a
+clean run is trustworthy.
+
+## Lab 6: Enable Data Safe (security pillar)
+
+For targets that opted into `datasafe`, register them as Data Safe target
+databases. First run the Data Safe DB-side script (`06-enable-data-safe.sql`) to
+create/grant the Data Safe service account (DBSNMP for the POC, or a dedicated
+account), then register:
+
+```bash
+dbman-opsi data-safe --config dbman-opsi.local.yaml                       # dry-run
+export DBMAN_OPSI_DBSNMP_PASSWORD='<prompted-value>'
+dbman-opsi data-safe --config dbman-opsi.local.yaml --user DBSNMP \
+  --password-env DBMAN_OPSI_DBSNMP_PASSWORD --apply                        # live registration
+unset DBMAN_OPSI_DBSNMP_PASSWORD
+```
+
+This creates a Data Safe private endpoint in the DB subnet (if one is not already
+referenced), registers the `target-database`, and persists its OCID back into the
+config. Confirm the target reaches `ACTIVE`:
+
+```bash
+dbman-opsi discover --profile <OCI_PROFILE> --region <OCI_REGION> --compartment <OCID> --json
+# the target DB should now show data_safe_status = ENABLED
+```
+
+If a target shows `NEEDS_ATTENTION` with `ORA-01017`, the network path is fine but
+the service-account password is wrong — fix the DB-side password (a CDB common
+user like DBSNMP must be changed with `CONTAINER=ALL`) and re-run with `--apply`.
+For Data Masking / Data Discovery, also run the per-target privilege script from
+the OCI Console (Data Safe > Target databases > Register > Download Privilege
+Script).
 
 ## Resource Manager Path
 
