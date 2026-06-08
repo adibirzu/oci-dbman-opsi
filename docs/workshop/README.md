@@ -231,6 +231,12 @@ SQL, service names, and users):
 
 ![Data Safe target databases](../screenshots/console-04-data-safe-targets.png)
 
+**Data Safe — Security Assessment** (Lab 6). With the targets registered, Data Safe
+assesses their posture — Risk level, Risks by category, and Top-5 security controls
+(Auditing / Encryption / Password discipline / Patch compliance):
+
+![Data Safe security assessment](../screenshots/console-06-data-safe-assessment.png)
+
 `discover --json` corroborates the Console: each enabled DB reports
 `dbm_status: ENABLED`, `opsi_status: ENABLED`, and `data_safe_status: ENABLED`.
 
