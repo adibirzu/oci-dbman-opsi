@@ -74,3 +74,37 @@ def test_runner_tears_down_even_when_a_script_fails(tmp_path: Path) -> None:
 
     # The bastion session must still be deleted on failure (cleanup in finally).
     assert any("delete" in " ".join(c) for c in ex.fg)
+
+
+def test_resolve_session_id_parses_quoted_and_plain() -> None:
+    ex = _FakeExec()
+    # Default resolver uses self._exec; stub it to return a JSON-quoted OCID.
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="1.2.3.4", ssh_key="/k", profile="cap", region="eu-frankfurt-1",
+        exec_fn=lambda argv, input=None: '"ocid1.bastionsession.q"\n',
+        exec_bg_fn=ex.run_bg, sleeper=lambda d: None,
+    )
+    assert runner._resolve_session_id() == "ocid1.bastionsession.q"
+
+    runner2 = BastionSqlRunner(
+        bastion_id="b", target_private_ip="1.2.3.4", ssh_key="/k", profile="cap", region="eu-frankfurt-1",
+        exec_fn=lambda argv, input=None: "ocid1.bastionsession.plain\n",
+        exec_bg_fn=ex.run_bg, sleeper=lambda d: None,
+    )
+    assert runner2._resolve_session_id() == "ocid1.bastionsession.plain"
+
+
+def test_teardown_is_best_effort_on_delete_failure() -> None:
+    calls: list[str] = []
+
+    def ex(argv, input=None):  # noqa: A002
+        calls.append(" ".join(argv))
+        raise RuntimeError("delete blew up")
+
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="1.2.3.4", ssh_key="/k", profile="cap", region="eu-frankfurt-1",
+        exec_fn=ex, exec_bg_fn=lambda a: None, sleeper=lambda d: None,
+    )
+    # Must not raise even though the delete command fails.
+    runner._teardown("ocid1.bastionsession.x")
+    assert any("session delete" in c for c in calls)
