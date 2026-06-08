@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from dbman_opsi.checks import PreflightReport, TargetReport
 from dbman_opsi.config import EnablementConfig, Target
+from dbman_opsi.datasafe import DataSafeDecision, DataSafeService
 from dbman_opsi.enablement import EnablementService
 from dbman_opsi.handoff import generate_handoff
 from dbman_opsi.oci_cli import OciCli
@@ -42,6 +43,7 @@ class ConfigureReport:
     preflight: PreflightReport
     decisions: tuple[TargetDecision, ...]
     handoff_paths: tuple[Path, ...] = ()
+    data_safe: tuple[DataSafeDecision, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -54,14 +56,21 @@ class ConfigureReport:
             "preflight": self.preflight.to_dict(),
             "decisions": [decision.to_dict() for decision in self.decisions],
             "handoff_paths": [str(path) for path in self.handoff_paths],
+            "data_safe": [decision.to_dict() for decision in self.data_safe],
         }
 
 
 class ConfigureService:
-    def __init__(self, oci: OciCli, enablement: EnablementService | None = None) -> None:
+    def __init__(
+        self,
+        oci: OciCli,
+        enablement: EnablementService | None = None,
+        datasafe: DataSafeService | None = None,
+    ) -> None:
         self.oci = oci
         self.preflight = PreflightService(oci)
         self.enablement = enablement or EnablementService(oci)
+        self.datasafe = datasafe
 
     def configure(
         self,
@@ -96,7 +105,20 @@ class ConfigureService:
         handoff_paths: tuple[Path, ...] = ()
         if any(decision.action == "handoff" for decision in decisions):
             handoff_paths = tuple(generate_handoff(config, handoff_dir))
-        return ConfigureReport(mode=mode, preflight=report, decisions=tuple(decisions), handoff_paths=handoff_paths)
+        # Third pillar: when a Data Safe service is wired and we are applying,
+        # register Data Safe targets for the targets that opted into 'datasafe'.
+        # Additive — a blocked Data Safe registration does not fail the DBM/OPSI
+        # flow (it surfaces as a data_safe decision the operator can act on).
+        data_safe: tuple[DataSafeDecision, ...] = ()
+        if mode == "apply" and self.datasafe is not None:
+            data_safe = tuple(self.datasafe.enable_all(config))
+        return ConfigureReport(
+            mode=mode,
+            preflight=report,
+            decisions=tuple(decisions),
+            handoff_paths=handoff_paths,
+            data_safe=data_safe,
+        )
 
     def _decide(
         self,
