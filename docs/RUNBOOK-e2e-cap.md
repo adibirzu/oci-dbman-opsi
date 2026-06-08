@@ -331,6 +331,8 @@ Committed (redacted) screenshots in `docs/screenshots/`:
   `dbman-opsi-dbcs2-PDB1`) all **Active**.
 - `console-05-performance-hub.png` — Performance Hub: Activity Summary / Average
   Active Sessions + ASH Analytics (SQL-detail tables blurred — live SQL/service/users).
+- `console-06-data-safe-assessment.png` — Data Safe **Security Assessment**: Risk
+  level + Risks by category + Top-5 security controls (aggregate charts only).
 
 The Managed Databases (`console-01`) and fleet (`console-02`) views now show **both**
 DB systems — the original `DBMOPSI`/`PDB1` and the freshly-provisioned
