@@ -331,3 +331,17 @@ Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/acco
 name and emails; for operator-pasted images, sensitive bands (header
 region/account/avatar, compartment chip) are Gaussian-blurred with PIL. Raw captures
 go to `docs/screenshots/raw/` (gitignored) — only redacted images are committed.
+
+### Pending: Data Safe Console view (operator capture)
+
+A Data Safe screenshot is the one remaining showcase asset. It needs a live,
+logged-in browser (the extension policy blocks automation), so capture it with the
+same **CDP-attach** procedure above and add a redacted
+`console-04-data-safe-targets.png`:
+
+1. Console → **Oracle Data Safe** → **Target databases** (region eu-frankfurt-1).
+2. Show the registered target(s) **Active** (e.g. `dbman-opsi-dbcs-PDB1`,
+   `dbman-opsi-dbcs2-cdb`, `dbman-opsi-dbcs2-PDB1`) and, optionally, a
+   **Security Assessment** summary for one target.
+3. Redact OCIDs / IPs / tenancy / db_unique_name+domain (blur the header band and
+   any service strings) before committing; raw → `docs/screenshots/raw/`.

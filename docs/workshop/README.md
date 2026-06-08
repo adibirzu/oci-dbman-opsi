@@ -125,7 +125,17 @@ targets that are already enabled, and only enables when everything passes:
 
 ```bash
 dbman-opsi configure --config dbman-opsi.local.yaml              # plan: gate only
-dbman-opsi configure --config dbman-opsi.local.yaml --apply      # enable when ready
+dbman-opsi configure --config dbman-opsi.local.yaml --apply      # enable DBM + OPSI when ready
+```
+
+To enable **all three pillars in one pass**, add `--with-data-safe` (Data Safe is
+registered for targets that opted into `datasafe`, after DBM/OPSI):
+
+```bash
+export DBMAN_OPSI_DBSNMP_PASSWORD='<prompted-value>'
+dbman-opsi configure --config dbman-opsi.local.yaml --apply \
+  --with-data-safe --data-safe-password-env DBMAN_OPSI_DBSNMP_PASSWORD
+unset DBMAN_OPSI_DBSNMP_PASSWORD
 ```
 
 If a DBA must run the database steps separately, generate handoff packets instead
