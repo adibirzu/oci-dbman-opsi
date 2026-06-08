@@ -2,14 +2,26 @@
 
 [![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/example-org/dbman-opsi/archive/refs/heads/main.zip)
 
-`dbman-opsi` is a public-repo-ready workshop toolkit for enabling OCI Database Management and OCI Operations Insights across:
+`dbman-opsi` is a public-repo-ready workshop toolkit for enabling three OCI
+observability/security pillars — **Database Management (DBM)**, **Operations
+Insights (OPSI)**, and **Data Safe** — across:
 
 - Base Database Service / DBCS
 - Autonomous Database
 - OCI Exadata Database Service
 - External databases and external Exadata through OCI Management Agents
 
-The tool runs from OCI Cloud Shell, a local workstation, OCI Resource Manager, or any automation runner that has OCI CLI and Terraform access. Every tenant-specific value is supplied through variables, ignored local config files, OCI Vault, or environment variables.
+Each target opts into the pillars it wants via `services` (`dbm`, `opsi`,
+`datasafe`; default `dbm`+`opsi`). The tool runs from OCI Cloud Shell, a local
+workstation, OCI Resource Manager, or any automation runner that has OCI CLI and
+Terraform access. Every tenant-specific value is supplied through variables,
+ignored local config files, OCI Vault, or environment variables.
+
+## Architecture
+
+See [docs/architecture.md](docs/architecture.md) for the system view, module map,
+command lifecycle, the three-pillar detection model, the read-live/redaction
+boundary, and the OPSI validation verdict model (with Mermaid diagrams).
 
 ## Workshop
 
@@ -33,14 +45,17 @@ source .venv/bin/activate
 pip install -e .[dev]
 
 dbman-opsi doctor
+dbman-opsi discover --profile <OCI_PROFILE> --region <OCI_REGION> --compartment <OCID>  # 3-pillar inventory
 dbman-opsi plan --profile <OCI_PROFILE> --region <OCI_REGION> --output dbman-opsi.local.yaml
 dbman-opsi provision --config dbman-opsi.local.yaml --render-only
 dbman-opsi prepare-prereqs --config dbman-opsi.local.yaml --dry-run
 dbman-opsi generate-db-scripts --config dbman-opsi.local.yaml --output generated/db-scripts
 dbman-opsi generate-opsi-payloads --config dbman-opsi.local.yaml --output generated/opsi-payloads
+dbman-opsi db-exec --config dbman-opsi.local.yaml            # generate DB scripts + show hybrid run plan
 dbman-opsi preflight --config dbman-opsi.local.yaml
-dbman-opsi configure --config dbman-opsi.local.yaml          # plan: detect + gate, no changes
+dbman-opsi configure --config dbman-opsi.local.yaml          # plan: detect + gate, no changes (DBM+OPSI)
 dbman-opsi enable --config dbman-opsi.local.yaml --dry-run
+dbman-opsi data-safe --config dbman-opsi.local.yaml          # register Data Safe targets (datasafe pillar)
 dbman-opsi validate --config dbman-opsi.local.yaml
 ```
 
@@ -79,7 +94,8 @@ For your public fork, update the button URL to your repository archive URL.
 ## Commands
 
 - `doctor`: check Python, OCI CLI, and Terraform availability. Pass `--profile`/`--region` to also confirm the OCI session is authenticated (not just installed).
-- `plan`: discover compartments, networks, databases, Vaults, private endpoints, and agents. For DBCS/Exadata it can also discover pluggable databases (PDBs) and add them as PDB targets linked to their parent CDB.
+- `discover`: read-only inventory of reusable resources (subnets, vaults, databases, endpoints, agents, bastions). Reports the **three-pillar status per database** — `dbm_status`, `opsi_status`, `data_safe_status`, plus `enabled_services`/`missing_services` — so you can see at a glance what is on. `--json` for automation (OCIDs redacted in JSON), `--subtree` to scan a compartment tree.
+- `plan`: discover compartments, networks, databases, Vaults, private endpoints, and agents, then write a config. Prompts per target for which pillars to enable (`dbm`/`opsi`/`datasafe`) and credentials. For DBCS/Exadata it can also discover pluggable databases (PDBs) and add them as PDB targets linked to their parent CDB.
 - `provision`: render Terraform variables and optionally run Terraform.
 - `import-tf-outputs`: read `terraform output` and merge the created OCIDs (subnet, VCN, Database Management private endpoint, provisioned database IDs) back into the config so `enable`/`configure` pick them up without manual copy.
 - `prepare-prereqs`: create service-side private endpoints and optional Vault secrets from an environment variable.
@@ -90,18 +106,26 @@ For your public fork, update the button URL to your repository archive URL.
 - `configure`: orchestrated detect → branch-by-location → gate → act flow. `--apply` enables, `--db-side-only` emits DBA handoff packets, `--force` overrides blockers, `--json` for automation.
 - `enable`: run OCI Database Management and Operations Insights enablement. Idempotent and self-healing — re-runs tolerate an already-enabled DBM (409) and **reconcile** the connection (so a corrected service name or rotated credential takes effect), skip already-ACTIVE OPSI insights, and (in `--apply`) set the advanced-diagnostics preferred credentials. Use `--skip-credentials` to opt out of the last step.
 - `set-credentials`: set the DBM advanced-diagnostics preferred credentials (`PC_READ`/`PC_WRITE`) via a Vault-backed named credential, so on-demand tasks (Performance Hub, AWR, ADDM, SQL Tuning) work. Idempotent; retries the flaky `dbmgmt` control plane and reports blocked targets with remediation.
-- `validate`: check service state and collection readiness. Reports the real OPSI Database Insight lifecycle (`ACTIVE`/`FAILED`/`NOT_FOUND`/`UNKNOWN`) per target rather than a generic message.
+- `data-safe`: register databases as **Data Safe** target databases for targets that opt into the `datasafe` pillar. Creates a Data Safe private endpoint in the DB subnet if needed, prompts for the service-account credentials (DBSNMP default; `--password-env` for non-interactive), registers the target, and persists the target OCID back into the config. Dry-run by default; `--apply` performs live registration.
+- `db-exec`: regenerate the DB-side SQL scripts and show the **hybrid run plan** — auto-run via Bastion in non-production tenancies, generate-and-handoff in production (`emdemo`). `--force` treats the run as non-production.
+- `validate`: check service state and collection readiness. Reports the real OPSI Database Insight lifecycle (`ACTIVE`/`FAILED`/`NOT_FOUND`/`UNKNOWN`) per target rather than a generic message — using a reliable GET-by-OCID and a verdict model that never emits a false `NOT_FOUND` from the flaky list.
 
 ## End-to-end enablement, Terraform & troubleshooting
 
 - **Reproducible runbook:** [docs/RUNBOOK-e2e-cap.md](docs/RUNBOOK-e2e-cap.md) walks the full
   Phase 0→5 flow (confirm infra → doctor/preflight → DB-side proof → generate →
-  enable + validate → Console showcase), with the five defects found and fixed
-  running it live.
+  enable + validate → Console showcase), with every defect found and fixed
+  running it live — including Data Safe enablement on an existing DB and a
+  freshly-provisioned DBCS.
 - **Troubleshooting KB:** [KB.md](KB.md) maps live-tenancy failure signatures to
   root cause + fix (OPSI insight 80% failure, DBM idempotency, DBSNMP lock loop,
-  DBM stale-service reconcile, validate blindness). On any error, the CLI also
-  prints a *Solution* + *Manual step* from the same remediation map.
+  DBM stale-service reconcile, validate blindness, the OCID-redaction-in-data-path
+  bug, Data Safe `NEEDS_ATTENTION`/DBSNMP rotation, and the zero-start Terraform
+  apply-time failures). On any error, the CLI also prints a *Solution* + *Manual
+  step* from the same remediation map.
+- **Eval-first regression suite:** [tests/evals/README.md](tests/evals/README.md)
+  organizes capability and regression evals by defect signature so each fixed
+  defect (e.g. the OPSI list flap, the `validate --dry-run` stub) stays fixed.
 - **Declarative / ORM path:** [terraform/modules/dbm-opsi-enablement](terraform/modules/dbm-opsi-enablement)
   is a feature-toggled, `for_each`-driven module (DBM features management, named
   credential, OPSI insight, plus a CLI step for preferred credentials). Pure
