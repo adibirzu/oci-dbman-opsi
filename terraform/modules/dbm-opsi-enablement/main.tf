@@ -9,6 +9,7 @@ locals {
   dbm_targets  = var.enable_database_management ? var.targets : {}
   opsi_targets = var.enable_ops_insights && var.opsi_private_endpoint_id != null ? var.targets : {}
   cred_targets = var.set_preferred_credentials ? var.targets : {}
+  data_safe_targets = var.enable_data_safe && var.data_safe_private_endpoint_id != null ? var.targets : {}
 
   # Cartesian product of credential targets x preferred-credential slots.
   preferred_credentials = merge([
@@ -130,6 +131,36 @@ resource "oci_opsi_database_insight" "insight" {
     # deployment_type is accepted on create but not returned by the API, so
     # without this TF would perpetually try to re-set it and force replacement.
     ignore_changes = [deployment_type]
+  }
+
+  depends_on = [oci_database_management_database_dbm_features_management.dbm]
+}
+
+# 5. Data Safe target-database registration (security pillar).
+# Connects through the Data Safe private endpoint as the monitoring user. The
+# password is plaintext in state (the API takes a password, not a Vault secret),
+# so supply it via TF_VAR_data_safe_password and keep state restricted.
+resource "oci_data_safe_target_database" "target" {
+  for_each       = local.data_safe_targets
+  compartment_id = var.compartment_id
+  display_name   = each.key
+
+  database_details {
+    database_type       = "DATABASE_CLOUD_SERVICE"
+    infrastructure_type = "ORACLE_CLOUD"
+    db_system_id        = each.value.db_system_id
+    service_name        = each.value.service_name
+    listener_port       = 1521
+  }
+
+  connection_option {
+    connection_type              = "PRIVATE_ENDPOINT"
+    datasafe_private_endpoint_id = var.data_safe_private_endpoint_id
+  }
+
+  credentials {
+    user_name = var.monitoring_user
+    password  = var.data_safe_password
   }
 
   depends_on = [oci_database_management_database_dbm_features_management.dbm]
