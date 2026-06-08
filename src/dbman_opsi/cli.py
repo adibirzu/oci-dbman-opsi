@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from dbman_opsi.agent_scripts import generate_agent_scripts
+from dbman_opsi.bastion_exec import BastionSqlRunner
 from dbman_opsi.config import EnablementConfig, load_config, save_config
 from dbman_opsi.credentials import CredentialService
 from dbman_opsi.datasafe import DataSafeDecision, DataSafeService
@@ -145,7 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     db_exec.add_argument("--config", default="dbman-opsi.yaml")
     db_exec.add_argument("--scripts-dir", default="generated/db-scripts")
-    db_exec.add_argument("--force", action="store_true", help="Treat as non-production (plan auto-exec even for prod)")
+    db_exec.add_argument("--force", action="store_true", help="Treat as non-production (auto-exec even for prod)")
+    db_exec.add_argument("--apply", action="store_true", help="Auto-run DB-side scripts via Bastion (non-prod). Requires --bastion-id/--target-ip/--ssh-key")
+    db_exec.add_argument("--bastion-id", help="Bastion OCID for --apply auto-exec")
+    db_exec.add_argument("--target-ip", help="DB node private IP for --apply auto-exec")
+    db_exec.add_argument("--ssh-key", help="SSH private key path (with matching .pub) for the Bastion session + DB node")
+    db_exec.add_argument("--answers-file", help="File whose contents are piped to each script's SQL*Plus accept prompts")
 
     data_safe = subcommands.add_parser(
         "data-safe",
@@ -359,10 +365,20 @@ def main(argv: list[str] | None = None) -> int:
         # per-target run plan. Actual auto-execution against the DB runs through the
         # Bastion procedure / handoff packet (see generated <target>/HANDOFF.md).
         generate_db_scripts(config, Path(args.scripts_dir))
-        decisions = DbExecService().plan(config, force=args.force)
+        if args.apply:
+            if not (args.bastion_id and args.target_ip and args.ssh_key):
+                raise SystemExit("db-exec --apply requires --bastion-id, --target-ip, and --ssh-key")
+            answers = Path(args.answers_file).read_text(encoding="utf-8") if args.answers_file else None
+            runner = BastionSqlRunner(
+                bastion_id=args.bastion_id, target_private_ip=args.target_ip, ssh_key=args.ssh_key,
+                profile=config.profile, region=config.region, answers=answers,
+            )
+            decisions = DbExecService(runner).execute(config, args.scripts_dir, force=args.force)
+        else:
+            decisions = DbExecService().plan(config, force=args.force)
         for decision in decisions:
             print(f"- db-exec {decision.target}: {decision.action} ({decision.detail})")
-        return 0
+        return 1 if any(d.action == "failed" for d in decisions) else 0
 
     if args.command == "data-safe":
         config = load_config(args.config)
