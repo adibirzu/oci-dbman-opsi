@@ -164,7 +164,7 @@ class DiscoveryService:
         # once, then join them back to each DB by OCID (avoids an N+1 lookup per
         # database). Best-effort: an empty read just yields NOT_ENABLED statuses.
         insights = _safe(lambda: self.oci.list_opsi_database_insights(cid), [])
-        data_safe_targets = _safe(lambda: self.oci.list_data_safe_targets(cid), [])
+        data_safe_targets = self._data_safe_targets_enriched(cid)
         return CompartmentInventory(
             name=str(compartment.get("name", "")),
             id=cid,
@@ -223,6 +223,40 @@ class DiscoveryService:
             )
         return tuple(vaults)
 
+    def _data_safe_targets_enriched(self, cid: str) -> list[dict[str, Any]]:
+        """List Data Safe targets, enriching each with GET database-details.
+
+        The ``target-database list`` summary has ``database-details = null``; the
+        service-name needed to attribute a Base DB target to a specific PDB (vs
+        the CDB root) only appears on GET. Best-effort: a failed GET leaves the
+        summary as-is (callers fall back to the coarse DB-system match).
+        """
+
+        targets = _safe(lambda: self.oci.list_data_safe_targets(cid), [])
+        enriched: list[dict[str, Any]] = []
+        for target in targets:
+            target_id = str(target.get("id"))
+            full = _safe(lambda tid=target_id: self.oci.get_data_safe_target(tid), {})
+            if isinstance(full, dict) and full.get("database-details"):
+                enriched.append({**target, "database-details": full.get("database-details")})
+            else:
+                enriched.append(target)
+        return enriched
+
+    @staticmethod
+    def _service_name(record: dict[str, Any]) -> str | None:
+        """Extract a DB's service name from its connection strings (after the '/')."""
+
+        strings = record.get("connection-strings") or {}
+        value = (
+            strings.get("pdb-default")
+            or strings.get("cdb-default")
+            or (strings.get("all-connection-strings") or {}).get("cdbDefault")
+        )
+        if isinstance(value, str) and "/" in value:
+            return value.rsplit("/", 1)[-1]
+        return None
+
     def _databases(
         self,
         cid: str,
@@ -272,5 +306,7 @@ class DiscoveryService:
             state=str(record.get("lifecycle-state", "")),
             dbm_status=str(dbm_status(record, kind, status_role) or "NOT_ENABLED"),
             opsi_status=opsi_insight_status(insights, db_id),
-            data_safe_status=data_safe_status(data_safe_targets, db_id, db_system_id),
+            data_safe_status=data_safe_status(
+                data_safe_targets, db_id, db_system_id, DiscoveryService._service_name(record)
+            ),
         )
