@@ -92,6 +92,43 @@ def test_discovery_detects_three_pillars_per_db() -> None:
     assert cdb.to_dict()["data_safe_status"] == "ENABLED"
 
 
+class _PdbGrainOci:
+    """Minimal fake exercising service-name disambiguation of a Base DB target."""
+
+    def list_db_systems(self, compartment_id):
+        return [{"id": "sys-9"}]
+
+    def list_databases(self, compartment_id, db_system_id):
+        return [{"id": "cdb-9", "db-name": "PRODCDB", "lifecycle-state": "AVAILABLE",
+                 "connection-strings": {"cdb-default": "h:1521/cdb9.svc"}}]
+
+    def list_pluggable_databases(self, compartment_id):
+        return [{"id": "pdb-9", "pdb-name": "APPPDB", "lifecycle-state": "AVAILABLE",
+                 "connection-strings": {"pdb-default": "h:1521/apppdb.svc"},
+                 "pluggable-database-management-config": {"management-status": "ENABLED"}}]
+
+    def list_data_safe_targets(self, compartment_id):
+        # Summary: database-details null; join key in associated-resource-ids.
+        return [{"id": "dst-9", "lifecycle-state": "ACTIVE",
+                 "associated-resource-ids": ["sys-9"], "database-details": None}]
+
+    def get_data_safe_target(self, target_database_id):
+        # GET enriches with database-details incl. the PDB service name.
+        return {"id": "dst-9", "lifecycle-state": "ACTIVE",
+                "associated-resource-ids": ["sys-9"],
+                "database-details": {"db-system-id": "sys-9", "service-name": "apppdb.svc"}}
+
+
+def test_discovery_attributes_data_safe_to_pdb_by_service() -> None:
+    inventory = DiscoveryService(_PdbGrainOci()).discover([{"id": "c", "name": "prod"}])  # type: ignore[arg-type]
+    compartment = inventory.compartments[0]
+    pdb = next(db for db in compartment.databases if db.role == "PDB")
+    cdb = next(db for db in compartment.databases if db.role == "CDB")
+    # The target's service-name matches the PDB, not the CDB root.
+    assert pdb.data_safe_status == "ENABLED"
+    assert cdb.data_safe_status == "NOT_ENABLED"
+
+
 def test_discovery_to_dict_skips_empty() -> None:
     class Empty(FakeOci):
         def list_vcns(self, compartment_id):

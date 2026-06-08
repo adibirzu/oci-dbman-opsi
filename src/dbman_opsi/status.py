@@ -82,21 +82,50 @@ def opsi_insight_status(insights: list[dict[str, Any]], db_id: str) -> str:
     return "NOT_ENABLED"
 
 
-def data_safe_status(targets: list[dict[str, Any]], db_id: str, db_system_id: str | None = None) -> str:
-    """ENABLED if a Data Safe target-database references this DB (or its DB system).
+def _target_state(target: dict[str, Any]) -> str:
+    if str(target.get("lifecycle-state", "")).upper() in _RESOURCE_ENABLED_STATES:
+        return "ENABLED"
+    return str(target.get("lifecycle-state") or "NOT_ENABLED")
 
-    Data Safe registration is a standalone ``target-database`` resource, so a DB
-    is "Data Safe enabled" when a registered target's database details point back
-    at this database OCID (autonomous / cloud) or its parent DB-system OCID
-    (Base Database / Exadata cloud service).
+
+def data_safe_status(
+    targets: list[dict[str, Any]],
+    db_id: str,
+    db_system_id: str | None = None,
+    service_name: str | None = None,
+) -> str:
+    """ENABLED if a Data Safe target-database references this specific DB.
+
+    Data Safe registration is a standalone ``target-database`` resource. Match in
+    order of precision so a Base Database CDB and its PDBs are attributed
+    correctly even though they share a DB system OCID:
+
+    1. **Exact OCID** — the target's database details / associations contain this
+       DB's OCID (autonomous: ``autonomous-database-id``; or a target keyed by the
+       DB OCID directly).
+    2. **Service name** — the target's ``database-details.service-name`` equals
+       this DB's service. This disambiguates which PDB (or the CDB root) a
+       ``DATABASE_CLOUD_SERVICE`` target covers; targets must be GET-enriched for
+       ``database-details`` to be present (the LIST summary has it null).
+    3. **Coarse DB-system fallback** — only for targets that carry *no*
+       service-name to disambiguate with; keeps a CDB ENABLED when the target
+       summary could not be enriched.
     """
 
-    wanted = {db_id}
-    if db_system_id:
-        wanted.add(str(db_system_id))
+    coarse_state: str | None = None
     for target in targets:
-        if wanted & _candidate_ids(target):
-            if str(target.get("lifecycle-state", "")).upper() in _RESOURCE_ENABLED_STATES:
-                return "ENABLED"
-            return str(target.get("lifecycle-state") or "NOT_ENABLED")
-    return "NOT_ENABLED"
+        candidate_ids = _candidate_ids(target)
+        details = target.get("database-details") or {}
+        target_service = details.get("service-name")
+        # 1 + 2: precise matches.
+        if db_id in candidate_ids:
+            return _target_state(target)
+        # Oracle service names are case-insensitive (the listener may register
+        # 'PDB1.x' while the target stored 'pdb1.x').
+        if service_name and target_service and target_service.lower() == service_name.lower():
+            return _target_state(target)
+        # 3: remember a coarse DB-system match, but only when this target cannot
+        # be disambiguated by service name (else it would over-match siblings).
+        if db_system_id and not target_service and str(db_system_id) in candidate_ids:
+            coarse_state = _target_state(target)
+    return coarse_state or "NOT_ENABLED"
