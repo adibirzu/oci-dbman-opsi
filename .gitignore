@@ -30,3 +30,4 @@ pytest-of-*/
 terraform/**/*.auto.tfvars.json
 terraform/**/*.auto.tfvars
 terraform/**/*.tfvars
+terraform/**/.terraform.lock.hcl
