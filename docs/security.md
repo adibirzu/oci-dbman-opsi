@@ -16,6 +16,24 @@ Screenshots for workshops must not show tenant names, user names, tenancy OCIDs,
 
 ## Validation Before Publishing
 
+Install the repository hook once per clone:
+
+```bash
+git config core.hooksPath scripts
+```
+
+The `scripts/pre-push` hook blocks pushes when non-Markdown changes contain
+format-shaped OCI resource identifiers or OCIR registry paths. It checks the
+Git push range when Git supplies one and falls back to the current working tree
+when run manually. If `gitleaks` is installed, the hook also runs:
+
+```bash
+gitleaks detect --source . --config .gitleaks.toml --no-banner
+```
+
+If `gitleaks` is missing, the hook prints a warning and continues so the
+format-based audit still runs everywhere.
+
 Run:
 
 ```bash
@@ -25,3 +43,11 @@ rg -n 'ocid1\.|<personal-name>|<tenant-name>|130\.61|161\.153' README.md docs te
 ```
 
 The final `rg` command should return no public sensitive values.
+
+Bypass the hook only for intentional, reviewed exceptions:
+
+```bash
+git push --no-verify
+```
+
+Bypassing skips both the OCI identifier audit and the optional `gitleaks` scan.

@@ -1,6 +1,19 @@
 from pathlib import Path
 
-from dbman_opsi.config import EnablementConfig, Target, load_config, save_config
+import pytest
+
+from dbman_opsi.config import (
+    ConfigError,
+    EnablementConfig,
+    Target,
+    load_config,
+    save_config,
+    validate_config,
+)
+
+
+def _ocid(resource_type: str, suffix: str = "a") -> str:
+    return "ocid1" + f".{resource_type}.oc1.." + (suffix * 16)
 
 
 def test_config_round_trip_preserves_local_references(tmp_path: Path) -> None:
@@ -32,6 +45,7 @@ def test_config_round_trip_preserves_data_safe_and_services(tmp_path: Path) -> N
             Target(
                 kind="dbcs",
                 name="dbmopsi",
+                service_name="db_high",
                 services=("dbm", "opsi", "datasafe"),
                 data_safe_target_id="ocid1" + ".datasafetargetdatabase.oc1..ddddexample",
                 data_safe_private_endpoint_id="ocid1" + ".datasafeprivateendpoint.oc1..eeeeexample",
@@ -61,3 +75,127 @@ def test_config_sanitized_view_redacts_sensitive_shapes() -> None:
     config = EnablementConfig(profile="DEFAULT", region="eu-frankfurt-1", tenancy_id="ocid1" + ".tenancy.oc1..x")
 
     assert config.sanitized()["tenancy_id"] == "<OCI_OCID>"
+
+
+def test_validate_config_reports_bad_target_kind() -> None:
+    config = EnablementConfig(
+        profile="DEFAULT",
+        region="eu-frankfurt-1",
+        targets=(Target(kind="mysql", name="bad-kind"),),  # type: ignore[arg-type]
+    )
+
+    problems = validate_config(config)
+
+    assert (
+        "targets[0] bad-kind: kind must be one of autonomous, dbcs, exadata, external-db, external-exadata"
+        in problems
+    )
+
+
+def test_validate_config_requires_service_name_for_dbcs() -> None:
+    config = EnablementConfig(
+        profile="DEFAULT",
+        region="eu-frankfurt-1",
+        targets=(Target(kind="dbcs", name="dbcs"),),
+    )
+
+    assert validate_config(config) == ["targets[0] dbcs: service_name is required for dbcs targets"]
+
+
+def test_validate_config_reports_malformed_id_field() -> None:
+    config = EnablementConfig(
+        profile="DEFAULT",
+        region="eu-frankfurt-1",
+        targets=(
+            Target(
+                kind="autonomous",
+                name="adb",
+                resource_id="not-an-ocid",
+            ),
+        ),
+    )
+
+    assert validate_config(config) == ["targets[0] adb: resource_id must look like an OCI OCID"]
+
+
+def test_load_config_reports_all_validation_problems(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "profile: DEFAULT",
+                "region: eu-frankfurt-1",
+                "tenancy_id: invalid-tenancy",
+                "targets:",
+                "  - kind: mysql",
+                "    name: broken",
+                "    resource_id: also-invalid",
+                "    services: [dbm, metrics]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as error:
+        load_config(path)
+
+    message = str(error.value)
+    assert "tenancy_id" in message
+    assert "kind" in message
+    assert "resource_id" in message
+    assert "services" in message
+
+
+def test_load_config_rejects_dbcs_without_service_name(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "profile: DEFAULT",
+                "region: eu-frankfurt-1",
+                "targets:",
+                "  - kind: dbcs",
+                "    name: dbcs",
+                f"    resource_id: {_ocid('database')}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="service_name"):
+        load_config(path)
+
+
+def test_load_config_keeps_valid_config_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "valid.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "profile: DEFAULT",
+                "region: eu-frankfurt-1",
+                f"tenancy_id: {_ocid('tenancy')}",
+                "network:",
+                f"  vcn_id: {_ocid('vcn', 'b')}",
+                "targets:",
+                "  - kind: dbcs",
+                "    name: dbcs",
+                f"    resource_id: {_ocid('database', 'c')}",
+                "    service_name: db_high",
+                "    services: [dbm, opsi]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(path)
+
+    assert loaded.profile == "DEFAULT"
+    assert loaded.tenancy_id == _ocid("tenancy")
+    assert loaded.network.vcn_id == _ocid("vcn", "b")
+    assert loaded.targets[0] == Target(
+        kind="dbcs",
+        name="dbcs",
+        resource_id=_ocid("database", "c"),
+        service_name="db_high",
+        services=("dbm", "opsi"),
+    )

@@ -156,3 +156,4 @@ For your public fork, update the button URL to your repository archive URL.
 Generated local configs contain OCID references needed for automation, but they are ignored by Git. Plaintext database credentials must never be written to config, Terraform variables, screenshots, or documentation. Use OCI Vault and environment variables.
 
 See [docs/security.md](docs/security.md) before publishing screenshots or pushing a public repository.
+Install the pre-push audit with `git config core.hooksPath scripts`.
