@@ -11,15 +11,20 @@ Run this in OCI Cloud Shell or on a local workstation with OCI CLI and Terraform
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+python -m pip install -e '.[dev]'
 dbman-opsi doctor
 ```
+
+Quote `'.[dev]'` when using zsh; otherwise zsh treats `[dev]` as a filename
+pattern and fails before pip runs. After `source .venv/bin/activate`, `python`
+points at the virtual environment.
 
 Expected result: `READY: python, oci, terraform`.
 
 ## Lab 2: Discover Or Select Targets
 
-Start the wizard and choose an existing compartment, VCN, subnet, and database target:
+Start the wizard and choose an existing compartment, VCN, subnet, Vault resources,
+private endpoints, and database target from the discovered lists:
 
 ```bash
 dbman-opsi plan --profile <OCI_PROFILE> --region <OCI_REGION> --output dbman-opsi.local.yaml
@@ -29,8 +34,20 @@ For each target the wizard asks **which pillars to enable** — `dbm` (Database
 Management), `opsi` (Operations Insights), and/or `datasafe` (Data Safe). The
 default is `dbm`+`opsi`; add `datasafe` to also register the database as a Data
 Safe target (Lab 6). PDB targets inherit their parent CDB's pillar selection.
+The wizard searches the selected compartment first, then other accessible
+compartments, because workshop resources are often split across database,
+network, observability, and security compartments.
+If the OCI profile contains a tenancy OCID, the wizard uses it automatically and
+does not ask for it. If existing VCNs are discovered, press Enter at
+`Create a PoC VCN/subnet?` to reuse one. The wizard also reads IAM policies and reports whether the
+Database Management (`dpd`) and Operations Insights service-principal statements
+are already present.
 
-For DBCS, select the target database and keep the monitoring user as `DBSNMP` unless your policy requires a custom user.
+For DBCS, select the actual target database/CDB resource from the discovered
+database list. Do not paste the parent DB system OCID as the database/resource
+OCID; the wizard records the parent DB system separately when Data Safe needs it
+and can add PDBs in the PDB discovery step. Keep the monitoring user as `DBSNMP`
+unless your policy requires a custom user.
 
 For Autonomous Database, choose the existing Autonomous Database resource. Database Management and Operations Insights can be validated directly from OCI status.
 
@@ -243,4 +260,3 @@ assesses their posture — Risk level, Risks by category, and Top-5 security con
 ## Resource Manager Path
 
 Use the Deploy to Oracle Cloud button in the repository README to launch the Terraform stack in any tenant. Resource Manager provisions only OCI-side prerequisites. Database credentials and database-side SQL execution remain explicit workshop steps.
-

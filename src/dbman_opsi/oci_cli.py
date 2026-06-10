@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import configparser
+import os
+from pathlib import Path
 from typing import Any
 
 from dbman_opsi.runner import CommandRunner
@@ -59,6 +62,18 @@ class OciCli:
     def _base_args(self) -> list[str]:
         return ["oci", "--profile", self.profile, "--region", self.region]
 
+    def profile_tenancy(self) -> str | None:
+        """Return the tenancy OCID configured for this OCI CLI profile, if readable."""
+
+        config_file = Path(os.environ.get("OCI_CONFIG_FILE", "~/.oci/config")).expanduser()
+        if not config_file.exists():
+            return None
+        parser = configparser.ConfigParser()
+        parser.read(config_file)
+        if parser.has_option(self.profile, "tenancy"):
+            return parser.get(self.profile, "tenancy")
+        return parser.get("DEFAULT", "tenancy", fallback=None)
+
     def list_compartments(self, tenancy_id: str) -> list[dict[str, Any]]:
         data = self.run_json([
             "iam",
@@ -74,15 +89,15 @@ class OciCli:
         return self._items(data)
 
     def list_vcns(self, compartment_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["network", "vcn", "list", "--compartment-id", compartment_id])
+        data = self.run_json(["network", "vcn", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def list_subnets(self, compartment_id: str, vcn_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["network", "subnet", "list", "--compartment-id", compartment_id, "--vcn-id", vcn_id])
+        data = self.run_json(["network", "subnet", "list", "--compartment-id", compartment_id, "--vcn-id", vcn_id, "--all"])
         return self._items(data)
 
     def list_db_systems(self, compartment_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["db", "system", "list", "--compartment-id", compartment_id])
+        data = self.run_json(["db", "system", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def list_databases(self, compartment_id: str, db_system_id: str) -> list[dict[str, Any]]:
@@ -104,7 +119,7 @@ class OciCli:
         return self._data(self.run_json(["db", "system", "get", "--db-system-id", db_system_id]))
 
     def list_pluggable_databases(self, compartment_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["db", "pluggable-database", "list", "--compartment-id", compartment_id])
+        data = self.run_json(["db", "pluggable-database", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def get_pluggable_database(self, pluggable_database_id: str) -> dict[str, Any]:
@@ -117,7 +132,7 @@ class OciCli:
         ]))
 
     def list_autonomous_databases(self, compartment_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["db", "autonomous-database", "list", "--compartment-id", compartment_id])
+        data = self.run_json(["db", "autonomous-database", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def get_autonomous_database(self, autonomous_database_id: str) -> dict[str, Any]:
@@ -138,7 +153,7 @@ class OciCli:
         return self._items(data)
 
     def list_vaults(self, compartment_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(["kms", "management", "vault", "list", "--compartment-id", compartment_id])
+        data = self.run_json(["kms", "management", "vault", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def list_keys(self, compartment_id: str, management_endpoint: str) -> list[dict[str, Any]]:
@@ -152,6 +167,10 @@ class OciCli:
             "--endpoint",
             management_endpoint,
         ])
+        return self._items(data)
+
+    def list_secrets(self, compartment_id: str) -> list[dict[str, Any]]:
+        data = self.run_json(["vault", "secret", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
 
     def list_bastions(self, compartment_id: str) -> list[dict[str, Any]]:
@@ -487,6 +506,9 @@ class OciCli:
     def list_policies(self, compartment_id: str) -> list[dict[str, Any]]:
         data = self.run_json(["iam", "policy", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
+
+    def get_group(self, group_id: str) -> dict[str, Any]:
+        return self._data(self.run_json(["iam", "group", "get", "--group-id", group_id]))
 
     def get_management_agent(self, agent_id: str) -> dict[str, Any]:
         return self._data(self.run_json(["management-agent", "agent", "get", "--management-agent-id", agent_id]))
