@@ -163,3 +163,38 @@ def test_discovery_to_dict_skips_empty() -> None:
 
     inventory = DiscoveryService(Empty()).discover([{"id": "c", "name": "empty"}])  # type: ignore[arg-type]
     assert inventory.to_dict() == {"compartments": []}
+
+
+def test_parallel_map_preserves_order_and_runs_concurrently() -> None:
+    # Order must match the input; concurrency is proven deterministically with a
+    # Barrier that only releases once all workers arrive together (a serial map
+    # would deadlock and raise BrokenBarrierError on timeout).
+    import threading
+
+    from dbman_opsi.discovery import _parallel_map
+
+    barrier = threading.Barrier(3, timeout=5)
+
+    def doubled(value: int) -> int:
+        barrier.wait()
+        return value * 2
+
+    assert _parallel_map(doubled, [1, 2, 3], max_workers=3) == [2, 4, 6]
+
+
+def test_parallel_map_falls_back_to_serial_for_trivial_inputs() -> None:
+    from dbman_opsi.discovery import _parallel_map
+
+    assert _parallel_map(lambda x: x + 1, [10], max_workers=8) == [11]   # single item
+    assert _parallel_map(lambda x: x + 1, [10, 20], max_workers=1) == [11, 21]  # max_workers=1
+    assert _parallel_map(lambda x: x + 1, [], max_workers=8) == []        # empty
+
+
+def test_discover_parallel_matches_serial_across_compartments() -> None:
+    compartments = [{"id": f"cmpt-{n}", "name": f"c{n}"} for n in range(4)]
+    serial = DiscoveryService(FakeOci(), max_workers=1).discover(compartments)        # type: ignore[arg-type]
+    parallel = DiscoveryService(FakeOci(), max_workers=8).discover(compartments)      # type: ignore[arg-type]
+
+    # Same results, same order — parallelism must not reorder or drop compartments.
+    assert parallel.to_dict() == serial.to_dict()
+    assert tuple(c.id for c in parallel.compartments) == ("cmpt-0", "cmpt-1", "cmpt-2", "cmpt-3")
