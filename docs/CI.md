@@ -74,7 +74,7 @@ The config extends the default gitleaks ruleset and adds:
 | `oci-ocid` | Any `ocid1.<resource-type>.oc1.*` identifier — covers all resource types tracked in `redact.py` |
 | `oci-isk-key` | `isk_<40 hex chars>` — OCI internal service keys |
 | `oci-api-fingerprint` | 16 colon-delimited hex pairs — OCI API key fingerprint format |
-| `oci-tenancy-namespace` | Known tenancy namespace strings (`<OCIR_NAMESPACE>`, etc.) |
+| `oci-tenancy-namespace` | Known tenancy namespace strings (e.g. `<TENANCY_NAMESPACE>`) |
 | `oci-public-ip` | Public-IP blocks from the tenancy matrix (`130.61.*`, `161.153.*`, etc.) |
 
 The default ruleset detects generic secrets (AWS keys, GCP tokens, GitHub PATs,
