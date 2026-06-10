@@ -52,7 +52,7 @@ class BastionSqlRunner:
         local_port: int = 8022,
         bastion_host: str | None = None,
         session_ttl: int = 3600,
-        remote_dir: str = "/tmp",
+        remote_dir: str = "/tmp",  # nosec B108 - remote DB-host SSH path, not a local tempfile
         answers: str | None = None,
         known_hosts: str | None = None,
         exec_fn: Callable[..., str] | None = None,
