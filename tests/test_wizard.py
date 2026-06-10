@@ -1,6 +1,6 @@
 import builtins
 
-from dbman_opsi.wizard import _select, run_wizard
+from dbman_opsi.wizard import _plan_identity, _select, run_wizard
 
 
 class FakeOci:
@@ -47,6 +47,18 @@ class FakeOci:
                 ]
             }
         ]
+
+
+def test_plan_identity_uses_profile_tenancy_and_policy_group(monkeypatch) -> None:
+    answers = iter(["1"])
+    monkeypatch.setattr(builtins, "input", lambda prompt: next(answers))
+
+    tenancy_id, compartment_id, search_compartments, policy_group = _plan_identity(ProfileTenancyOci())  # type: ignore[arg-type]
+
+    assert tenancy_id == "profile-tenancy-id"
+    assert compartment_id == "compartment-id"
+    assert [compartment["id"] for compartment in search_compartments] == ["compartment-id"]
+    assert policy_group == "db-admins"
 
 
 def test_wizard_discovers_and_selects_resources(monkeypatch) -> None:

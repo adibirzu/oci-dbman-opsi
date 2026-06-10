@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from dbman_opsi.config import (
     DEFAULT_SERVICES,
@@ -19,6 +20,26 @@ from dbman_opsi.oci_cli import OciCli
 _VALID_SERVICES = ("dbm", "opsi", "datasafe")
 _DEFAULT_POLICY_GROUP = "dbman-opsi-admins"
 _REQUIRED_POLICY_NEEDLES = ("service dpd", "service operations-insights")
+
+
+@dataclass(frozen=True)
+class _TargetDraft:
+    kind: str
+    name: str
+    provision: bool
+    selected: dict[str, object] | None
+    compartment_id: str
+    resource_id: str | None
+    service_name: str | None
+    monitoring_user: str | None
+
+
+@dataclass(frozen=True)
+class _EndpointSelections:
+    password_secret_id: str
+    private_endpoint_id: str
+    opsi_private_endpoint_id: str
+    data_safe_private_endpoint_id: str
 
 
 def _ask_services() -> tuple[Service, ...]:
@@ -308,7 +329,7 @@ def _discover_pdb_targets(cdb: Target, compartment_id: str, oci: OciCli) -> list
     return targets
 
 
-def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> EnablementConfig:
+def _discover_profile_tenancy(oci: OciCli | None) -> str | None:
     discovered_tenancy = None
     if oci and hasattr(oci, "profile_tenancy"):
         try:
@@ -316,15 +337,28 @@ def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> Enableme
         except Exception as exc:  # noqa: BLE001 - keep manual tenancy entry as fallback
             print(f"Could not discover profile tenancy: {exc}")
     if discovered_tenancy:
-        tenancy_id = str(discovered_tenancy)
         print("Tenancy OCID: using OCI profile tenancy")
-    else:
-        tenancy_id = _ask("Tenancy OCID")
+        return str(discovered_tenancy)
+    return None
+
+
+def _plan_identity(
+    oci: OciCli | None,
+) -> tuple[str, str, list[dict[str, object]], str]:
+    tenancy_id = _discover_profile_tenancy(oci) or _ask("Tenancy OCID")
     compartments = _list_optional(oci, "compartments", lambda: oci.list_compartments(tenancy_id))
     selected_compartment = _select("Accessible compartments:", compartments)
     compartment_id = str(selected_compartment.get("id")) if selected_compartment else _ask("Target compartment OCID")
     search_compartments = _search_scope(selected_compartment, compartment_id, compartments)
     policy_group_name = _discover_policy_group(oci, tenancy_id, search_compartments)
+    return tenancy_id, compartment_id, search_compartments, policy_group_name
+
+
+def _plan_network(
+    oci: OciCli | None,
+    compartment_id: str,
+    search_compartments: list[dict[str, object]],
+) -> NetworkSelection:
     existing_vcns = _discover_across_compartments("VCNs", search_compartments, lambda cid: oci.list_vcns(cid)) if oci else []
     create_network = _ask_bool("Create a PoC VCN/subnet?", not bool(_active(existing_vcns)))
     vcn_id = None
@@ -335,11 +369,18 @@ def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> Enableme
         vcn_compartment_id = str((selected_vcn or {}).get("_compartment_id") or compartment_id)
         subnets = _list_optional(oci, "subnets", lambda: oci.list_subnets(vcn_compartment_id, vcn_id))
         subnet_id = _select_id("Available subnets:", subnets, "Existing private subnet OCID")
-    network = NetworkSelection(
+    return NetworkSelection(
         create_test_network=create_network,
         vcn_id=vcn_id,
         subnet_id=subnet_id,
     )
+
+
+def _plan_vault(
+    oci: OciCli | None,
+    compartment_id: str,
+    search_compartments: list[dict[str, object]],
+) -> VaultSelection:
     create_vault = _ask_bool("Create a PoC Vault/key?", False)
     vault_id = None
     key_id = None
@@ -351,115 +392,208 @@ def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> Enableme
         endpoint = str(selected_vault.get("management-endpoint") or "") if selected_vault else ""
         keys = _list_optional(oci, "Vault keys", lambda: oci.list_keys(vault_compartment_id, endpoint)) if endpoint else []
         key_id = _select_id("Available Vault keys:", keys, "Existing Key OCID")
-    vault = VaultSelection(
+    return VaultSelection(
         create_vault=create_vault,
         vault_id=vault_id,
         key_id=key_id,
     )
+
+
+def _prompt_target_draft(
+    kind: str,
+    provision: bool,
+    compartment_id: str,
+    discovered: list[dict[str, object]],
+) -> _TargetDraft:
+    selected_target = _select("Discovered matching targets:", discovered)
+    default_name = _target_name(selected_target or {}, kind)
+    name = _ask("Target display name", default_name)
+    resource_id = None if provision else str(selected_target.get("id")) if selected_target else _ask("Existing database/resource OCID")
+    target_compartment_id = str((selected_target or {}).get("_compartment_id") or compartment_id)
+    service_name = (
+        None
+        if kind == "autonomous"
+        else _ask("Database service name", str((selected_target or {}).get("_default_service_name") or "ORCLPDB1"))
+    )
+    monitoring_user = _ask("Monitoring username", "DBSNMP")
+    return _TargetDraft(
+        kind=kind,
+        name=name,
+        provision=provision,
+        selected=selected_target,
+        compartment_id=target_compartment_id,
+        resource_id=resource_id,
+        service_name=service_name,
+        monitoring_user=monitoring_user or None,
+    )
+
+
+def _select_dbcs_endpoints(
+    kind: str,
+    oci: OciCli | None,
+    search_compartments: list[dict[str, object]],
+) -> tuple[str, str, str]:
+    if kind not in {"dbcs", "exadata"}:
+        return "", "", ""
+    secrets = _discover_across_compartments("Vault secrets", search_compartments, lambda cid: oci.list_secrets(cid)) if oci else []
+    password_secret_id = _select_id(
+        "Available password secrets:",
+        secrets,
+        "Password secret OCID (leave blank if provision step will create it)",
+    )
+    dbm_endpoints = (
+        _discover_across_compartments(
+            "DB Management private endpoints",
+            search_compartments,
+            lambda cid: oci.list_db_management_private_endpoints(cid),
+        )
+        if oci
+        else []
+    )
+    private_endpoint_id = _select_id(
+        "Available DB Management private endpoints:",
+        dbm_endpoints,
+        "DB Management private endpoint OCID (leave blank if provision step will create it)",
+    )
+    opsi_endpoints = _discover_opsi_private_endpoints(oci, search_compartments)
+    opsi_private_endpoint_id = _select_id(
+        "Available Ops Insights private endpoints:",
+        opsi_endpoints,
+        "Ops Insights private endpoint OCID (leave blank if provision step will create it)",
+    )
+    return password_secret_id, private_endpoint_id, opsi_private_endpoint_id
+
+
+def _discover_opsi_private_endpoints(
+    oci: OciCli | None,
+    search_compartments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if not oci:
+        return []
+    return _discover_across_compartments(
+        "Ops Insights private endpoints",
+        search_compartments,
+        lambda cid: oci.list_opsi_private_endpoints(cid),
+    )
+
+
+def _select_data_safe_endpoint(
+    oci: OciCli | None,
+    services: tuple[Service, ...],
+    search_compartments: list[dict[str, object]],
+) -> str:
+    endpoints = (
+        _discover_across_compartments(
+            "Data Safe private endpoints",
+            search_compartments,
+            lambda cid: oci.list_data_safe_private_endpoints(cid),
+        )
+        if oci
+        else []
+    )
+    if "datasafe" not in services:
+        return ""
+    return _select_id(
+        "Available Data Safe private endpoints:",
+        endpoints,
+        "Data Safe private endpoint OCID (leave blank to create during enable)",
+    )
+
+
+def _select_endpoints(
+    draft: _TargetDraft,
+    oci: OciCli | None,
+    search_compartments: list[dict[str, object]],
+) -> tuple[_EndpointSelections, tuple[Service, ...]]:
+    password_secret_id, private_endpoint_id, opsi_private_endpoint_id = _select_dbcs_endpoints(
+        draft.kind, oci, search_compartments
+    )
+    services = _ask_services()
+    data_safe_private_endpoint_id = _select_data_safe_endpoint(oci, services, search_compartments)
+    return (
+        _EndpointSelections(
+            password_secret_id=password_secret_id,
+            private_endpoint_id=private_endpoint_id,
+            opsi_private_endpoint_id=opsi_private_endpoint_id,
+            data_safe_private_endpoint_id=data_safe_private_endpoint_id,
+        ),
+        services,
+    )
+
+
+def _database_metadata(draft: _TargetDraft) -> tuple[str | None, str]:
+    if draft.kind in {"dbcs", "exadata"} and draft.selected:
+        return str(draft.selected.get("_db_system_id") or ""), str(draft.selected.get("_database_role") or "CDB")
+    return None, "CDB"
+
+
+def _external_metadata(kind: str) -> tuple[str | None, str | None]:
+    if not kind.startswith("external"):
+        return None, None
+    external_host = _ask("External database host")
+    external_os = _ask("External host OS (linux/windows/solaris/aix)", "linux")
+    return external_host, external_os
+
+
+def _build_target(
+    draft: _TargetDraft,
+    endpoints: _EndpointSelections,
+    services: tuple[Service, ...],
+) -> Target:
+    db_system_id, database_role = _database_metadata(draft)
+    external_host, external_os = _external_metadata(draft.kind)
+    return Target(
+        kind=draft.kind,  # type: ignore[arg-type]
+        name=draft.name,
+        compartment_id=draft.compartment_id,
+        resource_id=draft.resource_id or None,
+        service_name=draft.service_name or None,
+        monitoring_user=draft.monitoring_user,
+        password_secret_id=endpoints.password_secret_id or None,
+        private_endpoint_id=endpoints.private_endpoint_id or None,
+        opsi_private_endpoint_id=endpoints.opsi_private_endpoint_id or None,
+        db_system_id=db_system_id,
+        data_safe_private_endpoint_id=endpoints.data_safe_private_endpoint_id or None,
+        services=services,
+        database_role=database_role,  # type: ignore[arg-type]
+        provision=draft.provision,
+        external_host=external_host or None,
+        external_os=external_os or None,  # type: ignore[arg-type]
+    )
+
+
+def _prompt_target(
+    oci: OciCli | None,
+    compartment_id: str,
+    search_compartments: list[dict[str, object]],
+) -> Target:
+    kind = _ask("Target kind (dbcs/autonomous/exadata/external-db/external-exadata)", "dbcs")
+    provision = _ask_bool("Provision this target from zero?", False)
+    discovered = _discover_target_choices(kind, search_compartments, oci) if not provision and oci else []
+    draft = _prompt_target_draft(kind, provision, compartment_id, discovered)
+    endpoints, services = _select_endpoints(draft, oci, search_compartments)
+    return _build_target(draft, endpoints, services)
+
+
+def _plan_target(
+    oci: OciCli | None,
+    compartment_id: str,
+    search_compartments: list[dict[str, object]],
+) -> list[Target]:
     targets: list[Target] = []
     while _ask_bool("Add a target?", len(targets) == 0):
-        kind = _ask("Target kind (dbcs/autonomous/exadata/external-db/external-exadata)", "dbcs")
-        provision = _ask_bool("Provision this target from zero?", False)
-        discovered = _discover_target_choices(kind, search_compartments, oci) if not provision and oci else []
-        selected_target = _select("Discovered matching targets:", discovered)
-        default_name = _target_name(selected_target or {}, kind)
-        name = _ask("Target display name", default_name)
-        resource_id = None if provision else str(selected_target.get("id")) if selected_target else _ask("Existing database/resource OCID")
-        target_compartment_id = str((selected_target or {}).get("_compartment_id") or compartment_id)
-        service_name = (
-            None
-            if kind == "autonomous"
-            else _ask("Database service name", str((selected_target or {}).get("_default_service_name") or "ORCLPDB1"))
-        )
-        monitoring_user = _ask("Monitoring username", "DBSNMP")
-        password_secret_id = ""
-        private_endpoint_id = ""
-        opsi_private_endpoint_id = ""
-        if kind in {"dbcs", "exadata"}:
-            secrets = _discover_across_compartments("Vault secrets", search_compartments, lambda cid: oci.list_secrets(cid)) if oci else []
-            password_secret_id = _select_id(
-                "Available password secrets:",
-                secrets,
-                "Password secret OCID (leave blank if provision step will create it)",
-            )
-            dbm_private_endpoints = (
-                _discover_across_compartments(
-                    "DB Management private endpoints",
-                    search_compartments,
-                    lambda cid: oci.list_db_management_private_endpoints(cid),
-                )
-                if oci
-                else []
-            )
-            private_endpoint_id = _select_id(
-                "Available DB Management private endpoints:",
-                dbm_private_endpoints,
-                "DB Management private endpoint OCID (leave blank if provision step will create it)",
-            )
-            opsi_private_endpoints = (
-                _discover_across_compartments(
-                    "Ops Insights private endpoints",
-                    search_compartments,
-                    lambda cid: oci.list_opsi_private_endpoints(cid),
-                )
-                if oci
-                else []
-            )
-            opsi_private_endpoint_id = _select_id(
-                "Available Ops Insights private endpoints:",
-                opsi_private_endpoints,
-                "Ops Insights private endpoint OCID (leave blank if provision step will create it)",
-            )
-        services = _ask_services()
-        db_system_id = None
-        database_role = "CDB"
-        if kind in {"dbcs", "exadata"} and selected_target:
-            db_system_id = str(selected_target.get("_db_system_id") or "")
-            database_role = str(selected_target.get("_database_role") or "CDB")
-        data_safe_private_endpoints = (
-            _discover_across_compartments(
-                "Data Safe private endpoints",
-                search_compartments,
-                lambda cid: oci.list_data_safe_private_endpoints(cid),
-            )
-            if oci
-            else []
-        )
-        data_safe_private_endpoint_id = (
-            _select_id(
-                "Available Data Safe private endpoints:",
-                data_safe_private_endpoints,
-                "Data Safe private endpoint OCID (leave blank to create during enable)",
-            )
-            if "datasafe" in services
-            else ""
-        )
-        external_os = None
-        external_host = None
-        if kind.startswith("external"):
-            external_host = _ask("External database host")
-            external_os = _ask("External host OS (linux/windows/solaris/aix)", "linux")
-        target = Target(
-            kind=kind,  # type: ignore[arg-type]
-            name=name,
-            compartment_id=target_compartment_id,
-            resource_id=resource_id or None,
-            service_name=service_name or None,
-            monitoring_user=monitoring_user or None,
-            password_secret_id=password_secret_id or None,
-            private_endpoint_id=private_endpoint_id or None,
-            opsi_private_endpoint_id=opsi_private_endpoint_id or None,
-            db_system_id=db_system_id,
-            data_safe_private_endpoint_id=data_safe_private_endpoint_id or None,
-            services=services,
-            database_role=database_role,  # type: ignore[arg-type]
-            provision=provision,
-            external_host=external_host or None,
-            external_os=external_os or None,  # type: ignore[arg-type]
-        )
+        target = _prompt_target(oci, compartment_id, search_compartments)
         targets.append(target)
-        if kind in {"dbcs", "exadata"} and not provision and oci:
-            targets.extend(_discover_pdb_targets(target, target_compartment_id, oci))
+        if target.kind in {"dbcs", "exadata"} and not target.provision and oci:
+            targets.extend(_discover_pdb_targets(target, target.compartment_id or compartment_id, oci))
+    return targets
+
+
+def run_wizard(profile: str, region: str, oci: OciCli | None = None) -> EnablementConfig:
+    tenancy_id, compartment_id, search_compartments, policy_group_name = _plan_identity(oci)
+    network = _plan_network(oci, compartment_id, search_compartments)
+    vault = _plan_vault(oci, compartment_id, search_compartments)
+    targets = _plan_target(oci, compartment_id, search_compartments)
     return EnablementConfig(
         profile=profile,
         region=region,
