@@ -74,19 +74,15 @@ tags  = ["oci", "fingerprint"]
   paths = ['''(^|/)tests/''']
 
 [[rules]]
-id          = "oci-tenancy-namespace"
-description = "Known OCI tenancy registry namespace strings"
-# These are the specific namespace identifiers tracked in redact.py.
-# Split across literals in redact.py to avoid triggering this very rule;
-# we write them here in their reconstructed form.
-regex = '''\b(<OCIR_NAMESPACE>|<OCIR_NAMESPACE>|<OCIR_NAMESPACE>|<OCIR_NAMESPACE>)\b'''
-tags  = ["oci", "tenancy-namespace"]
-
-  [rules.allowlist]
-  paths = [
-    '''(^|/)\.gitleaks\.toml$''',
-    '''(^|/)redact\.py$''',
-  ]
+id          = "oci-registry-namespace"
+description = "OCIR registry path embedding a tenancy namespace"
+# Detect a tenancy namespace in the registry-path CONTEXT (…ocir.io/<namespace>/…)
+# instead of hardcoding this tenancy's namespace strings. Embedding the real
+# namespaces in a PUBLIC config is itself the exposure we are trying to prevent —
+# the literal list that used to live here was removed for that reason. The real
+# values live only in ~/.claude/private/ (never committed).
+regex = '''\b[a-z0-9-]+\.ocir\.io/[a-z0-9]{5,}'''
+tags  = ["oci", "ocir", "namespace"]
 
 [[rules]]
 id          = "oci-public-ip"
