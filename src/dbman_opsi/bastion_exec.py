@@ -17,12 +17,14 @@ monitoring password — in the order the script prompts for them.
 
 from __future__ import annotations
 
+import atexit
 import os
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from dbman_opsi.config import Target
 
@@ -49,7 +51,7 @@ class BastionSqlRunner:
         *,
         local_port: int = 8022,
         bastion_host: str | None = None,
-        session_ttl: int = 10800,
+        session_ttl: int = 3600,
         remote_dir: str = "/tmp",
         answers: str | None = None,
         known_hosts: str | None = None,
@@ -58,6 +60,7 @@ class BastionSqlRunner:
         session_id_fn: Callable[[], str] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         tunnel_wait: float = 6.0,
+        atexit_register: Callable[[Callable[[], None]], Any] = atexit.register,
     ) -> None:
         self.bastion_id = bastion_id
         self.target_private_ip = target_private_ip
@@ -75,6 +78,7 @@ class BastionSqlRunner:
         self._session_id_fn = session_id_fn or self._resolve_session_id
         self._sleep = sleeper
         self.tunnel_wait = tunnel_wait
+        self._atexit_register = atexit_register
 
     # SqlRunner protocol: (target, scripts) -> combined output.
     def __call__(self, target: Target, scripts: list[Path]) -> str:
@@ -94,6 +98,23 @@ class BastionSqlRunner:
         session_id = self._session_id_fn()
         known_hosts, kh_owned = self._known_hosts_path()
         ssh_opts = self._ssh_opts(known_hosts)
+
+        # Idempotent teardown: registered with atexit so an interpreter exit (or an
+        # unhandled signal that surfaces as an exception) still deletes the session,
+        # not just the normal finally below. SIGKILL can't be caught — the session
+        # TTL is the backstop for that. The guard makes the atexit + finally calls
+        # collapse to a single delete.
+        torn = {"done": False}
+
+        def _safe_teardown() -> None:
+            if torn["done"]:
+                return
+            torn["done"] = True
+            self._teardown(session_id)
+
+        self._atexit_register(_safe_teardown)
+
+        remote_paths: list[str] = []
         outputs: list[str] = []
         try:
             self._exec_bg([
@@ -105,6 +126,7 @@ class BastionSqlRunner:
             self._sleep(self.tunnel_wait)
             for script in scripts:
                 remote = f"{self.remote_dir}/{script.name}"
+                remote_paths.append(remote)
                 self._exec([
                     "scp", "-i", self.ssh_key, "-P", str(self.local_port), *ssh_opts,
                     str(script), f"opc@127.0.0.1:{remote}",
@@ -115,13 +137,29 @@ class BastionSqlRunner:
                     f"sudo su - oracle -c 'sqlplus -s / as sysdba @{remote}'",
                 ], input=self.answers))
         finally:
-            self._teardown(session_id)
+            # Remove the uploaded scripts while the tunnel is still up (before
+            # teardown), best-effort so a failed run still doesn't leave residue.
+            self._cleanup_remote(ssh_opts, remote_paths)
+            _safe_teardown()
             if kh_owned:
                 try:
                     Path(known_hosts).unlink()
                 except OSError:
                     pass
         return "\n".join(outputs)
+
+    def _cleanup_remote(self, ssh_opts: list[str], remote_paths: list[str]) -> None:
+        """Best-effort removal of uploaded scripts from the DB host's /tmp."""
+
+        if not remote_paths:
+            return
+        try:
+            self._exec([
+                "ssh", "-i", self.ssh_key, "-p", str(self.local_port), *ssh_opts,
+                "opc@127.0.0.1", "rm -f " + " ".join(remote_paths),
+            ])
+        except Exception:  # noqa: BLE001 - tunnel may be down; nothing else to do
+            pass
 
     def _ssh_opts(self, known_hosts: str) -> list[str]:
         """TOFU host-key options shared by the tunnel, scp and ssh hops.
