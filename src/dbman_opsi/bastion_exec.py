@@ -17,18 +17,14 @@ monitoring password — in the order the script prompts for them.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from dbman_opsi.config import Target
-
-_SSH_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "ConnectTimeout=20",
-]
 
 
 def _default_exec(argv: list[str], input: str | None = None) -> str:  # noqa: A002
@@ -56,6 +52,7 @@ class BastionSqlRunner:
         session_ttl: int = 10800,
         remote_dir: str = "/tmp",
         answers: str | None = None,
+        known_hosts: str | None = None,
         exec_fn: Callable[..., str] | None = None,
         exec_bg_fn: Callable[[list[str]], None] | None = None,
         session_id_fn: Callable[[], str] | None = None,
@@ -72,6 +69,7 @@ class BastionSqlRunner:
         self.session_ttl = session_ttl
         self.remote_dir = remote_dir
         self.answers = answers
+        self.known_hosts = known_hosts
         self._exec = exec_fn or _default_exec
         self._exec_bg = exec_bg_fn or _default_exec_bg
         self._session_id_fn = session_id_fn or self._resolve_session_id
@@ -94,30 +92,63 @@ class BastionSqlRunner:
             "--max-wait-seconds", "600", "--wait-interval-seconds", "15",
         ])
         session_id = self._session_id_fn()
+        known_hosts, kh_owned = self._known_hosts_path()
+        ssh_opts = self._ssh_opts(known_hosts)
         outputs: list[str] = []
         try:
             self._exec_bg([
                 "ssh", "-i", self.ssh_key, "-fNL",
                 f"{self.local_port}:{self.target_private_ip}:22", "-p", "22",
                 f"{session_id}@{self.bastion_host}",
-                "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ExitOnForwardFailure=yes", *ssh_opts,
             ])
             self._sleep(self.tunnel_wait)
             for script in scripts:
                 remote = f"{self.remote_dir}/{script.name}"
                 self._exec([
-                    "scp", "-i", self.ssh_key, "-P", str(self.local_port), *_SSH_OPTS,
+                    "scp", "-i", self.ssh_key, "-P", str(self.local_port), *ssh_opts,
                     str(script), f"opc@127.0.0.1:{remote}",
                 ])
                 outputs.append(self._exec([
-                    "ssh", "-i", self.ssh_key, "-p", str(self.local_port), *_SSH_OPTS,
+                    "ssh", "-i", self.ssh_key, "-p", str(self.local_port), *ssh_opts,
                     "opc@127.0.0.1",
                     f"sudo su - oracle -c 'sqlplus -s / as sysdba @{remote}'",
                 ], input=self.answers))
         finally:
             self._teardown(session_id)
+            if kh_owned:
+                try:
+                    Path(known_hosts).unlink()
+                except OSError:
+                    pass
         return "\n".join(outputs)
+
+    def _ssh_opts(self, known_hosts: str) -> list[str]:
+        """TOFU host-key options shared by the tunnel, scp and ssh hops.
+
+        ``accept-new`` records the host key on first contact into ``known_hosts``
+        and *verifies* it for every subsequent hop in the same run — closing the
+        loopback-tunnel MITM gap that ``StrictHostKeyChecking=no`` left open. The
+        file is per-run because the loopback tunnel (127.0.0.1:local_port) maps to
+        a different DB host each run; a persistent file would reject the new key as
+        a host-key change.
+        """
+
+        return [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", "ConnectTimeout=20",
+        ]
+
+    def _known_hosts_path(self) -> tuple[str, bool]:
+        """Return ``(path, owned)``; create a 0600 per-run file when unset."""
+
+        if self.known_hosts:
+            return self.known_hosts, False
+        fd, path = tempfile.mkstemp(prefix="dbman-knownhosts-")
+        os.close(fd)
+        os.chmod(path, 0o600)
+        return path, True
 
     def _teardown(self, session_id: str) -> None:
         try:
