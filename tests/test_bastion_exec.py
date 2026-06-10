@@ -121,6 +121,78 @@ def test_runner_registers_idempotent_atexit_teardown(tmp_path: Path) -> None:
     assert deletes_after == 1                     # idempotent: no second delete
 
 
+class _Handle:
+    """Stands in for the ssh-forward Popen; records terminate() calls."""
+
+    def __init__(self) -> None:
+        self.terminated = 0
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+
+def test_forward_process_is_terminated_in_finally(tmp_path: Path) -> None:
+    # H1: the local ssh -L forward must die with the run, not orphan and hold the
+    # port for a later run to misdeliver the password onto a stale host.
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    ex = _FakeExec()
+    handle = _Handle()
+
+    def run_bg(argv: list[str]) -> _Handle:
+        ex.bg.append(argv)
+        return handle
+
+    BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1", local_port=8022,
+        exec_fn=ex.run, exec_bg_fn=run_bg, session_id_fn=lambda: "s", sleeper=lambda d: None,
+    )(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    assert handle.terminated == 1
+
+
+def test_forward_drops_dash_f_so_caller_owns_the_process(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    ex = _FakeExec()
+
+    _runner(ex).__call__(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    forward = ex.bg[0]
+    assert "-fNL" not in forward and "-f" not in forward   # not self-backgrounded
+    assert "-NL" in forward                                 # Popen owns the foreground forward
+
+
+def test_ephemeral_local_port_when_unset(tmp_path: Path) -> None:
+    # H1: with no explicit local_port, a fresh ephemeral port is chosen per run and
+    # used consistently for the forward, scp and ssh — so a leaked forward on a
+    # fixed 8022 can never be silently reused.
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    ex = _FakeExec()
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1",
+        exec_fn=ex.run, exec_bg_fn=ex.run_bg, session_id_fn=lambda: "s", sleeper=lambda d: None,
+    )
+
+    runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    scp = next(c for c in ex.fg if c and c[0] == "scp")
+    port = scp[scp.index("-P") + 1]
+    assert int(port) > 1024 and port != "8022"
+    assert f"{port}:10.0.0.5:22" in " ".join(ex.bg[0])
+
+
+def test_rejects_remote_script_name_with_shell_metacharacters(tmp_path: Path) -> None:
+    # L6/M: script.name is interpolated into remote shell strings; reject anything
+    # that isn't a plain filename before it reaches scp/ssh.
+    bad = tmp_path / "evil; rm -rf x.sql"
+    bad.write_text("-- x")
+    ex = _FakeExec()
+
+    with pytest.raises(ValueError):
+        _runner(ex).__call__(Target(kind="dbcs", name="cdb", service_name="PDB1"), [bad])
+
+
 def test_runner_tears_down_even_when_a_script_fails(tmp_path: Path) -> None:
     s1 = tmp_path / "01.sql"; s1.write_text("-- a")
     ex = _FakeExec()

@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
+import shlex
+import socket
 import subprocess
 import tempfile
 import time
@@ -28,6 +31,19 @@ from typing import Any
 
 from dbman_opsi.config import Target
 
+# A remote script filename must be a plain name — it is interpolated into remote
+# shell command strings (scp target, sqlplus @path, rm -f), so anything with
+# whitespace or shell metacharacters is rejected before it can reach a shell.
+_SAFE_REMOTE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _free_port() -> int:
+    """Pick a currently-free local TCP port for this run's tunnel."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
 
 def _default_exec(argv: list[str], input: str | None = None) -> str:  # noqa: A002
     result = subprocess.run(argv, input=input, capture_output=True, text=True, check=False)
@@ -36,8 +52,11 @@ def _default_exec(argv: list[str], input: str | None = None) -> str:  # noqa: A0
     return result.stdout
 
 
-def _default_exec_bg(argv: list[str]) -> None:
-    subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def _default_exec_bg(argv: list[str]) -> subprocess.Popen:
+    # Return the handle so the caller owns the forward's lifecycle and can
+    # terminate it when the run ends (the forward runs foreground under Popen;
+    # ssh is invoked without -f so it does not self-background and detach).
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class BastionSqlRunner:
@@ -49,18 +68,19 @@ class BastionSqlRunner:
         profile: str,
         region: str,
         *,
-        local_port: int = 8022,
+        local_port: int | None = None,
         bastion_host: str | None = None,
         session_ttl: int = 3600,
         remote_dir: str = "/tmp",  # nosec B108 - remote DB-host SSH path, not a local tempfile
         answers: str | None = None,
         known_hosts: str | None = None,
         exec_fn: Callable[..., str] | None = None,
-        exec_bg_fn: Callable[[list[str]], None] | None = None,
+        exec_bg_fn: Callable[[list[str]], Any] | None = None,
         session_id_fn: Callable[[], str] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         tunnel_wait: float = 6.0,
         atexit_register: Callable[[Callable[[], None]], Any] = atexit.register,
+        atexit_unregister: Callable[[Callable[[], None]], Any] = atexit.unregister,
     ) -> None:
         self.bastion_id = bastion_id
         self.target_private_ip = target_private_ip
@@ -79,6 +99,7 @@ class BastionSqlRunner:
         self._sleep = sleeper
         self.tunnel_wait = tunnel_wait
         self._atexit_register = atexit_register
+        self._atexit_unregister = atexit_unregister
 
     # SqlRunner protocol: (target, scripts) -> combined output.
     def __call__(self, target: Target, scripts: list[Path]) -> str:
@@ -96,6 +117,10 @@ class BastionSqlRunner:
             "--max-wait-seconds", "600", "--wait-interval-seconds", "15",
         ])
         session_id = self._session_id_fn()
+        # A fresh ephemeral local port per run (unless one is pinned explicitly):
+        # a leaked forward from a prior run can never be silently reused, so the
+        # password is never piped to a stale host on a fixed port.
+        port = self.local_port if self.local_port is not None else _free_port()
         known_hosts, kh_owned = self._known_hosts_path()
         ssh_opts = self._ssh_opts(known_hosts)
 
@@ -103,7 +128,8 @@ class BastionSqlRunner:
         # unhandled signal that surfaces as an exception) still deletes the session,
         # not just the normal finally below. SIGKILL can't be caught — the session
         # TTL is the backstop for that. The guard makes the atexit + finally calls
-        # collapse to a single delete.
+        # collapse to a single delete, and the handler unregisters itself so it does
+        # not pin this runner alive or re-fire across multiple targets.
         torn = {"done": False}
 
         def _safe_teardown() -> None:
@@ -111,35 +137,40 @@ class BastionSqlRunner:
                 return
             torn["done"] = True
             self._teardown(session_id)
+            self._atexit_unregister(_safe_teardown)
 
         self._atexit_register(_safe_teardown)
 
+        forward: Any = None
         remote_paths: list[str] = []
         outputs: list[str] = []
         try:
-            self._exec_bg([
-                "ssh", "-i", self.ssh_key, "-fNL",
-                f"{self.local_port}:{self.target_private_ip}:22", "-p", "22",
+            forward = self._exec_bg([
+                "ssh", "-i", self.ssh_key, "-NL",
+                f"{port}:{self.target_private_ip}:22", "-p", "22",
                 f"{session_id}@{self.bastion_host}",
                 "-o", "ExitOnForwardFailure=yes", *ssh_opts,
             ])
             self._sleep(self.tunnel_wait)
             for script in scripts:
+                if not _SAFE_REMOTE_NAME.match(script.name):
+                    raise ValueError(f"unsafe script name for remote execution: {script.name!r}")
                 remote = f"{self.remote_dir}/{script.name}"
                 remote_paths.append(remote)
                 self._exec([
-                    "scp", "-i", self.ssh_key, "-P", str(self.local_port), *ssh_opts,
+                    "scp", "-i", self.ssh_key, "-P", str(port), *ssh_opts,
                     str(script), f"opc@127.0.0.1:{remote}",
                 ])
                 outputs.append(self._exec([
-                    "ssh", "-i", self.ssh_key, "-p", str(self.local_port), *ssh_opts,
+                    "ssh", "-i", self.ssh_key, "-p", str(port), *ssh_opts,
                     "opc@127.0.0.1",
-                    f"sudo su - oracle -c 'sqlplus -s / as sysdba @{remote}'",
+                    f"sudo su - oracle -c 'sqlplus -s / as sysdba @{shlex.quote(remote)}'",
                 ], input=self.answers))
         finally:
             # Remove the uploaded scripts while the tunnel is still up (before
-            # teardown), best-effort so a failed run still doesn't leave residue.
-            self._cleanup_remote(ssh_opts, remote_paths)
+            # teardown), then kill the forward and delete the session.
+            self._cleanup_remote(ssh_opts, remote_paths, port)
+            self._terminate_forward(forward)
             _safe_teardown()
             if kh_owned:
                 try:
@@ -148,15 +179,27 @@ class BastionSqlRunner:
                     pass
         return "\n".join(outputs)
 
-    def _cleanup_remote(self, ssh_opts: list[str], remote_paths: list[str]) -> None:
+    @staticmethod
+    def _terminate_forward(forward: Any) -> None:
+        """Kill the local ssh forward so it does not orphan and hold the port."""
+
+        if forward is None or not hasattr(forward, "terminate"):
+            return
+        try:
+            forward.terminate()
+        except Exception:  # noqa: BLE001 - best-effort; the forward may already be gone
+            pass
+
+    def _cleanup_remote(self, ssh_opts: list[str], remote_paths: list[str], port: int) -> None:
         """Best-effort removal of uploaded scripts from the DB host's /tmp."""
 
         if not remote_paths:
             return
+        quoted = " ".join(shlex.quote(path) for path in remote_paths)
         try:
             self._exec([
-                "ssh", "-i", self.ssh_key, "-p", str(self.local_port), *ssh_opts,
-                "opc@127.0.0.1", "rm -f " + " ".join(remote_paths),
+                "ssh", "-i", self.ssh_key, "-p", str(port), *ssh_opts,
+                "opc@127.0.0.1", f"rm -f {quoted}",
             ])
         except Exception:  # noqa: BLE001 - tunnel may be down; nothing else to do
             pass
