@@ -37,12 +37,48 @@ env vars — never hardcoded.
 
 See `~/.claude/CLAUDE.md` for the full tenancy matrix. Short form:
 
-- `cap` (staging tenancy, eu-frankfurt-1) — **full control**. Use for testing/experiments.
+- `cap` — **staging, full control**. Use for testing/experiments.
 - `emdemo` — **production, read-only** outside the `LogAnalytics` compartment.
-- `DEFAULT` (<TENANCY_NAME>) — personal scratch.
+- `DEFAULT` — personal scratch tenancy.
 
-Never inline real OCIDs, public IPs, tenancy namespaces, or datakeys in committed
-files — use `<PLACEHOLDER>` tokens.
+Real tenancy names, OCIDs, namespaces, and IPs live only in
+`~/.claude/private/` and the user's global `~/.claude/CLAUDE.md` — never in this repo.
+
+## Public-repo hygiene (MANDATORY)
+
+**This is a public repo. Never commit any real OCI identifier — not in code, docs,
+config, tests, or the secret-scanner config itself.** The most common slip is
+embedding real values "as examples" or as detection literals; that is itself the
+exposure.
+
+Never commit, in any tracked file (including `.gitleaks.toml`, `docs/`, tests):
+
+- **OCIR tenancy namespaces** (e.g. the `*.ocir.io/<namespace>` segment) — use
+  `${OCIR_TENANCY}` or `<OCIR_NAMESPACE>`.
+- **OCIDs** (`ocid1.<type>.oc1..<body>`) — use `<…_OCID>` placeholders.
+- **Tenancy names** (the real names live in `~/.claude/private/`; never inline
+  them) — use `<TENANCY_NAME>` or the generic profile label (`cap`/`emdemo`/`DEFAULT`).
+- **Public/private IPs of infra, API-key fingerprints, install keys, datakeys.**
+
+`.gitleaks.toml` must detect by **context/format** (e.g. `…ocir.io/<ns>`,
+`ocid1.<type>.oc1.<body>`), **never by hardcoding this tenancy's real values** —
+the scanner config is the worst place to inline a secret.
+
+**Pre-push audit (run before every push):**
+
+```bash
+# OCIDs (with a body) and OCIR namespaces in path context — detected by FORMAT,
+# so this command embeds no real values. Tenancy names have no format and must be
+# caught by review against the private list in ~/.claude/private/.
+git grep -nE 'ocid1\.[a-z0-9]+\.oc[0-9]\.[a-z0-9._-]{15,}|[a-z0-9-]+\.ocir\.io/[a-z0-9]+' \
+  -- . ':!*.md' && echo 'ABORT: real identifier in tracked files'
+gitleaks detect --source . --config .gitleaks.toml --no-banner   # must be 0 over full history
+```
+
+If a real value is found in **already-pushed history**, a new "fix" commit does
+NOT remove it — scrub with `git filter-repo --replace-text` and force-push (see
+the global `~/.claude/CLAUDE.md` remediation protocol), and rotate anything that
+was a live credential.
 
 ## Gotcha
 
