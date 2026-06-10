@@ -8,6 +8,21 @@ from dbman_opsi.config import EnablementConfig, NetworkSelection, Target, save_c
 from dbman_opsi.orchestrator import ConfigureReport, TargetDecision
 
 
+def _ocid(resource_type: str, suffix: str = "a") -> str:
+    return "ocid1" + f".{resource_type}.oc1.." + (suffix * 16)
+
+
+TENANCY_ID = _ocid("tenancy", "a")
+COMPARTMENT_ID = _ocid("compartment", "b")
+DATABASE_ID = _ocid("database", "c")
+SECRET_ID = _ocid("secret", "d")
+SUBNET_ID = _ocid("subnet", "e")
+VCN_ID = _ocid("vcn", "f")
+PRIVATE_ENDPOINT_ID = _ocid("privateendpoint", "a")
+DB_SYSTEM_ID = _ocid("dbsystem", "b")
+DATA_SAFE_PRIVATE_ENDPOINT_ID = _ocid("datasafeprivateendpoint", "c")
+
+
 def test_cli_generate_agent_scripts(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     output_dir = tmp_path / "agents"
@@ -16,7 +31,7 @@ def test_cli_generate_agent_scripts(tmp_path: Path) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            targets=(Target(kind="external-db", name="external", external_os="linux"),),
+            targets=(Target(kind="external-db", name="external", service_name="external", external_os="linux"),),
         ),
     )
 
@@ -32,7 +47,7 @@ def test_cli_provision_render_only(tmp_path: Path) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
             terraform_dir=str(terraform_dir),
         ),
     )
@@ -49,7 +64,7 @@ def test_cli_threads_single_run_id_into_journaled_runners(tmp_path: Path, monkey
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
             terraform_dir=str(terraform_dir),
             dry_run=True,
         ),
@@ -76,7 +91,7 @@ def test_cli_verbose_surfaces_command_timing(tmp_path: Path, monkeypatch, capsys
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
             terraform_dir=str(terraform_dir),
             dry_run=True,
         ),
@@ -112,7 +127,7 @@ def test_cli_generate_opsi_payloads(tmp_path: Path) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", password_secret_id="secret-id"),),
+            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", password_secret_id=SECRET_ID),),
         ),
     )
 
@@ -127,8 +142,8 @@ def test_cli_prepare_prereqs_dry_run(tmp_path: Path, capsys) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
-            network=NetworkSelection(vcn_id="vcn-id", subnet_id="subnet-id"),
+            compartment_id=COMPARTMENT_ID,
+            network=NetworkSelection(vcn_id=VCN_ID, subnet_id=SUBNET_ID),
         ),
     )
 
@@ -143,7 +158,7 @@ def test_cli_accepts_apply_flag_for_prepare_prereqs(tmp_path: Path, capsys) -> N
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
             dry_run=True,
         ),
     )
@@ -158,9 +173,9 @@ def _save_basic_config(config_path: Path) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            tenancy_id="tenancy-id",
-            compartment_id="compartment-id",
-            targets=(Target(kind="dbcs", name="cloud db", resource_id="db-id"),),
+            tenancy_id=TENANCY_ID,
+            compartment_id=COMPARTMENT_ID,
+            targets=(Target(kind="dbcs", name="cloud db", resource_id=DATABASE_ID, service_name="PDB1"),),
         ),
     )
 
@@ -255,22 +270,22 @@ def test_cli_import_tf_outputs_merges_and_writes(tmp_path: Path, monkeypatch) ->
             profile="DEFAULT",
             region="eu-frankfurt-1",
             network=NetworkSelection(create_test_network=True),
-            targets=(Target(kind="dbcs", name="cloud db", resource_id="db-id"),),
+            targets=(Target(kind="dbcs", name="cloud db", resource_id=DATABASE_ID, service_name="PDB1"),),
         ),
     )
 
     monkeypatch.setattr(
         "dbman_opsi.cli.read_terraform_outputs",
         lambda terraform_dir, runner: {
-            "subnet_ocid": {"value": "subnet-from-tf"},
-            "db_management_private_endpoint_ocid": {"value": "pe-from-tf"},
+            "subnet_ocid": {"value": SUBNET_ID},
+            "db_management_private_endpoint_ocid": {"value": PRIVATE_ENDPOINT_ID},
         },
     )
 
     assert main(["import-tf-outputs", "--config", str(config_path)]) == 0
     reloaded = load_config(config_path)
-    assert reloaded.network.subnet_id == "subnet-from-tf"
-    assert reloaded.targets[0].private_endpoint_id == "pe-from-tf"
+    assert reloaded.network.subnet_id == SUBNET_ID
+    assert reloaded.targets[0].private_endpoint_id == PRIVATE_ENDPOINT_ID
 
 
 def test_cli_import_tf_outputs_dry_run_does_not_write(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -314,18 +329,18 @@ def test_cli_data_safe_dry_run_reports_ready(tmp_path: Path, capsys) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
             targets=(
                 Target(
                     kind="dbcs",
                     name="dbmopsi",
-                    compartment_id="compartment-id",
-                    db_system_id="dbsys-1",
+                    compartment_id=COMPARTMENT_ID,
+                    db_system_id=DB_SYSTEM_ID,
                     service_name="PDB1",
-                    data_safe_private_endpoint_id="dspe-1",
+                    data_safe_private_endpoint_id=DATA_SAFE_PRIVATE_ENDPOINT_ID,
                     services=("dbm", "opsi", "datasafe"),
                 ),
-                Target(kind="dbcs", name="no-ds", services=("dbm", "opsi")),
+                Target(kind="dbcs", name="no-ds", service_name="PDB2", services=("dbm", "opsi")),
             ),
         ),
     )
@@ -344,9 +359,10 @@ def test_cli_data_safe_blocked_returns_nonzero(tmp_path: Path) -> None:
         EnablementConfig(
             profile="DEFAULT",
             region="eu-frankfurt-1",
-            compartment_id="compartment-id",
-            # Missing db_system_id / service_name / PE and no subnet to create one.
-            targets=(Target(kind="dbcs", name="dbmopsi", compartment_id="compartment-id",
+            compartment_id=COMPARTMENT_ID,
+            # Missing db_system_id / PE and no subnet to create one.
+            targets=(Target(kind="dbcs", name="dbmopsi", compartment_id=COMPARTMENT_ID,
+                            service_name="PDB1",
                             services=("dbm", "opsi", "datasafe")),),
         ),
     )
@@ -361,7 +377,7 @@ def test_cli_db_exec_plan_non_prod(tmp_path: Path, capsys) -> None:
         EnablementConfig(
             profile="cap",
             region="eu-frankfurt-1",
-            targets=(Target(kind="dbcs", name="dbmopsi"),),
+            targets=(Target(kind="dbcs", name="dbmopsi", service_name="PDB1"),),
         ),
     )
     assert main(["db-exec", "--config", str(config_path), "--scripts-dir", str(tmp_path / "s")]) == 0
@@ -378,7 +394,7 @@ def test_cli_db_exec_plan_production_hands_off(tmp_path: Path, capsys) -> None:
         EnablementConfig(
             profile="emdemo",
             region="us-phoenix-1",
-            targets=(Target(kind="dbcs", name="dbmopsi"),),
+            targets=(Target(kind="dbcs", name="dbmopsi", service_name="PDB1"),),
         ),
     )
     assert main(["db-exec", "--config", str(config_path), "--scripts-dir", str(tmp_path / "s")]) == 0

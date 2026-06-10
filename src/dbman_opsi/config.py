@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import yaml
 
@@ -17,6 +18,18 @@ TargetKind = Literal["dbcs", "autonomous", "exadata", "external-db", "external-e
 # "dbm" = Database Management, "opsi" = Operations Insights, "datasafe" = Data Safe.
 Service = Literal["dbm", "opsi", "datasafe"]
 DEFAULT_SERVICES: tuple[Service, ...] = ("dbm", "opsi")
+ALLOWED_TARGET_KINDS = frozenset(get_args(TargetKind))
+ALLOWED_SERVICES = frozenset(get_args(Service))
+OCID_PREFIX_RE = re.compile(r"^ocid1\.[a-z0-9]+\.oc[0-9]\.")
+
+
+class ConfigError(ValueError):
+    """Raised when loaded config fails boundary validation."""
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = tuple(problems)
+        message = "Invalid config:\n- " + "\n- ".join(problems)
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,90 @@ def from_dict(value: dict[str, Any]) -> EnablementConfig:
     )
 
 
+def validate_config(config: EnablementConfig) -> list[str]:
+    """Return all config validation problems without mutating config."""
+
+    problems = _validate_config_ocid_fields(config)
+    for index, target in enumerate(config.targets):
+        target_label = f"targets[{index}] {target.name}"
+        problems.extend(_validate_target(target, target_label))
+    return problems
+
+
+def _validate_target(target: Target, label: str) -> list[str]:
+    problems: list[str] = []
+    problems.extend(_validate_target_ocid_fields(target, label))
+    if target.kind not in ALLOWED_TARGET_KINDS:
+        expected = ", ".join(sorted(ALLOWED_TARGET_KINDS))
+        problems.append(f"{label}: kind must be one of {expected}")
+    invalid_services = sorted(service for service in target.services if service not in ALLOWED_SERVICES)
+    if invalid_services:
+        values = ", ".join(str(service) for service in invalid_services)
+        problems.append(f"{label}: services contains unsupported values: {values}")
+    if target.kind != "autonomous" and not target.service_name:
+        problems.append(f"{label}: service_name is required for {target.kind} targets")
+    return problems
+
+
+def _validate_config_ocid_fields(config: EnablementConfig) -> list[str]:
+    return _validate_ocid_fields("config", config, excluded_fields=frozenset({"targets"}))
+
+
+def _validate_target_ocid_fields(target: Target, label: str) -> list[str]:
+    problems: list[str] = []
+    for field_name, field_value in _iter_direct_ocid_values(target):
+        if _invalid_ocid_value(field_value):
+            problems.append(f"{label}: {field_name} must look like an OCI OCID")
+    return problems
+
+
+def _validate_ocid_fields(label: str, value: object, *, excluded_fields: frozenset[str]) -> list[str]:
+    problems: list[str] = []
+    for field_path, field_value in _iter_ocid_values(label, value, excluded_fields=excluded_fields):
+        if _invalid_ocid_value(field_value):
+            problems.append(f"{field_path} must look like an OCI OCID")
+    return problems
+
+
+def _iter_direct_ocid_values(value: object) -> list[tuple[str, object]]:
+    if not is_dataclass(value):
+        return []
+    return [
+        (item.name, getattr(value, item.name))
+        for item in fields(value)
+        if item.name.endswith(("_id", "_ocid"))
+    ]
+
+
+def _iter_ocid_values(
+    label: str,
+    value: object,
+    *,
+    excluded_fields: frozenset[str],
+) -> list[tuple[str, object]]:
+    if not is_dataclass(value):
+        return []
+    matches: list[tuple[str, object]] = []
+    for item in fields(value):
+        if item.name in excluded_fields:
+            continue
+        item_value = getattr(value, item.name)
+        item_path = f"{label}.{item.name}"
+        if item.name.endswith(("_id", "_ocid")):
+            matches.append((item_path, item_value))
+        elif is_dataclass(item_value):
+            matches.extend(_iter_ocid_values(item_path, item_value, excluded_fields=frozenset()))
+    return matches
+
+
+def _invalid_ocid_value(value: object) -> bool:
+    return value is not None and value != "" and not _looks_like_ocid(value)
+
+
+def _looks_like_ocid(value: object) -> bool:
+    return isinstance(value, str) and OCID_PREFIX_RE.match(value) is not None
+
+
 def to_dict(config: EnablementConfig) -> dict[str, Any]:
     return {
         "profile": config.profile,
@@ -150,7 +247,11 @@ def load_config(path: str | Path) -> EnablementConfig:
     data = json.loads(raw) if str(path).endswith(".json") else yaml.safe_load(raw)
     if not isinstance(data, dict):
         raise ValueError("Config root must be a mapping")
-    return from_dict(data)
+    config = from_dict(data)
+    problems = validate_config(config)
+    if problems:
+        raise ConfigError(problems)
+    return config
 
 
 def save_config(path: str | Path, config: EnablementConfig) -> None:
