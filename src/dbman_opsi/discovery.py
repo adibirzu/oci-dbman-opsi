@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from dbman_opsi.conn import service_name_from_record
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status
 
@@ -243,19 +244,7 @@ class DiscoveryService:
                 enriched.append(target)
         return enriched
 
-    @staticmethod
-    def _service_name(record: dict[str, Any]) -> str | None:
-        """Extract a DB's service name from its connection strings (after the '/')."""
-
-        strings = record.get("connection-strings") or {}
-        value = (
-            strings.get("pdb-default")
-            or strings.get("cdb-default")
-            or (strings.get("all-connection-strings") or {}).get("cdbDefault")
-        )
-        if isinstance(value, str) and "/" in value:
-            return value.rsplit("/", 1)[-1]
-        return None
+    _service_name = staticmethod(service_name_from_record)
 
     def _databases(
         self,
