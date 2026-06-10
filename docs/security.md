@@ -16,13 +16,20 @@ Screenshots for workshops must not show tenant names, user names, tenancy OCIDs,
 
 ## Validation Before Publishing
 
-Install the repository hook once per clone:
+Install the repository audit without changing `core.hooksPath`. This repository
+may already use ECC-managed hooks through `core.hooksPath`; running
+`git config core.hooksPath scripts` would replace that hook directory and
+disable the ECC pre-push checks.
 
-```bash
-git config core.hooksPath scripts
-```
+Use one of these non-conflicting approaches:
 
-The `scripts/pre-push` hook blocks pushes when non-Markdown changes contain
+- Chain `scripts/pre-push` from the existing `pre-push` file in the current
+  hooks directory reported by `git config --get core.hooksPath`.
+- Register `scripts/pre-push` through the pre-commit framework.
+- If the clone does not use `core.hooksPath`, symlink or copy `scripts/pre-push`
+  to `.git/hooks/pre-push` locally.
+
+The audit in `scripts/pre-push` blocks pushes when non-Markdown changes contain
 format-shaped OCI resource identifiers or OCIR registry paths. It checks the
 Git push range when Git supplies one and falls back to the current working tree
 when run manually. If `gitleaks` is installed, the hook also runs:

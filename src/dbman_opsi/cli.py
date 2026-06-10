@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dbman_opsi.agent_scripts import generate_agent_scripts
@@ -38,6 +38,12 @@ from dbman_opsi.validation import ValidationService
 from dbman_opsi.wizard import run_wizard
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _CliContext:
+    run_id: str
+    verbose: bool
 
 
 def _add_config_args(parser: argparse.ArgumentParser) -> None:
@@ -234,327 +240,282 @@ def _persist_data_safe_targets(
     return replace(config, targets=new_targets)
 
 
+def _config_runner(config: EnablementConfig, ctx: _CliContext, dry_run: bool) -> CommandRunner:
+    return _make_runner(
+        dry_run=dry_run,
+        run_id=ctx.run_id,
+        profile=config.profile,
+        region=config.region,
+        verbose=ctx.verbose,
+    )
+
+
+def _args_runner(args: argparse.Namespace, ctx: _CliContext, dry_run: bool) -> CommandRunner:
+    return _make_runner(
+        dry_run=dry_run,
+        run_id=ctx.run_id,
+        profile=args.profile,
+        region=args.region,
+        verbose=ctx.verbose,
+    )
+
+
+def _config_oci(config: EnablementConfig, ctx: _CliContext, dry_run: bool) -> OciCli:
+    return OciCli(config.profile, config.region, _config_runner(config, ctx, dry_run))
+
+
+def _cmd_plan(args: argparse.Namespace, ctx: _CliContext) -> int:
+    discovery = OciCli(args.profile, args.region, _args_runner(args, ctx, dry_run=False))
+    config = run_wizard(args.profile, args.region, discovery)
+    save_config(args.output, config)
+    print(f"Wrote sanitized config to {args.output}")
+    return 0
+
+
+def _cmd_doctor(args: argparse.Namespace, ctx: _CliContext) -> int:
+    checks = check_environment()
+    if args.profile:
+        checks = checks + (check_session(args.profile, args.region),)
+    for check in checks:
+        status = "ok" if check.ok else "missing"
+        print(f"{check.name}: {status} ({check.detail})")
+    print(summarize_checks(checks))
+    return 0 if all(check.ok for check in checks) else 1
+
+
+def _cmd_provision(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    tfvars = write_tfvars(config)
+    print(f"Wrote {tfvars}")
+    if not args.render_only:
+        dry_run = not args.apply and (args.dry_run or config.dry_run)
+        run_terraform(config, _config_runner(config, ctx, dry_run))
+    return 0
+
+
+def _cmd_enable(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    dry_run = not args.apply and (args.dry_run or config.dry_run)
+    EnablementService(_config_oci(config, ctx, dry_run)).enable_all(
+        config, force_reconcile=args.force_reconcile
+    )
+    if args.apply and not args.skip_credentials:
+        # Complete the workflow: set the DBM advanced-diagnostics preferred
+        # credentials. Best-effort: blocked targets print remediation.
+        for decision in CredentialService(_config_oci(config, ctx, dry_run=False)).set_all(config):
+            print(f"- credentials {decision.target}: {decision.status} ({decision.detail})")
+    return 0
+
+
+def _cmd_prepare_prereqs(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    dry_run = not args.apply and (args.dry_run or config.dry_run)
+    PrerequisiteService(_config_oci(config, ctx, dry_run)).prepare(config, args.password_env)
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    # Regression R2, formerly under `if args.command == "validate":`:
+    # validate is read-only and must remain equivalent to CommandRunner(dry_run=False).
+    findings = ValidationService(_config_oci(config, ctx, dry_run=False)).validate(config)
+    for finding in findings:
+        print(f"- {finding}")
+    return 0
+
+
+def _cmd_set_credentials(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    # Live reads + idempotent writes (named credential reuse, preferred SET).
+    decisions = CredentialService(_config_oci(config, ctx, dry_run=False)).set_all(config)
+    for decision in decisions:
+        print(f"- {decision.target}: {decision.status} ({decision.detail})")
+    blocked = [decision for decision in decisions if decision.status == "blocked"]
+    return 1 if blocked else 0
+
+
+def _cmd_discover(args: argparse.Namespace, ctx: _CliContext) -> int:
+    oci = OciCli(args.profile, args.region, _args_runner(args, ctx, dry_run=False))
+    root = args.compartment or args.tenancy
+    if not root:
+        raise SystemExit("discover requires --compartment or --tenancy")
+    compartments = [{"id": root, "name": "root"}]
+    if args.subtree:
+        tenancy = args.tenancy or root
+        compartments += oci.list_compartments(tenancy)
+    inventory = DiscoveryService(oci).discover(compartments)
+    if args.json:
+        print(json.dumps(redact_data(inventory.to_dict()), indent=2, sort_keys=True))
+    else:
+        print_inventory(inventory)
+    return 0
+
+
+def _cmd_import_tf_outputs(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    outputs = read_terraform_outputs(
+        args.terraform_dir or config.terraform_dir,
+        _config_runner(config, ctx, dry_run=False),
+    )
+    merged, changes = merge_outputs_into_config(config, outputs)
+    if not changes:
+        print("No new values to import from terraform outputs.")
+        return 0
+    for change in changes:
+        print(f"Updated {change}")
+    if args.dry_run:
+        print("Dry run: config not written.")
+        return 0
+    save_config(args.config, merged)
+    print(f"Wrote merged config to {args.config}")
+    return 0
+
+
+def _cmd_preflight(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    db_check = None
+    if args.db_check_file:
+        db_check = parse_validation_output(Path(args.db_check_file).read_text(encoding="utf-8"))
+    report = PreflightService(_config_oci(config, ctx, dry_run=False)).run(config, db_check=db_check)
+    if args.json:
+        print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
+    else:
+        print_preflight_report(report)
+    return 0 if report.ok else 1
+
+
+def _configure_datasafe(
+    args: argparse.Namespace,
+    config: EnablementConfig,
+    mode: str,
+    write_oci: OciCli,
+) -> DataSafeService | None:
+    if not args.with_data_safe or not any(target.wants("datasafe") for target in config.targets):
+        return None
+    return DataSafeService(
+        write_oci,
+        credential_provider=_make_data_safe_provider(
+            mode == "apply", args.data_safe_user, args.data_safe_password_env
+        ),
+    )
+
+
+def _cmd_configure(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    mode = "db-side-only" if args.db_side_only else ("apply" if args.apply else "plan")
+    # Reads are always live (read-only); only the enable write respects the mode.
+    read_oci = _config_oci(config, ctx, dry_run=False)
+    write_oci = _config_oci(config, ctx, dry_run=mode != "apply")
+    datasafe = _configure_datasafe(args, config, mode, write_oci)
+    service = ConfigureService(read_oci, EnablementService(write_oci), datasafe=datasafe)
+    report: ConfigureReport = service.configure(
+        config, mode=mode, handoff_dir=args.output, force=args.force
+    )
+    if args.json:
+        print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
+    else:
+        print_configure_report(report)
+    return 0 if report.ok else 1
+
+
+def _cmd_generate_agent_scripts(args: argparse.Namespace, ctx: _CliContext) -> int:
+    paths = generate_agent_scripts(load_config(args.config), Path(args.output))
+    for path in paths:
+        print(path)
+    return 0
+
+
+def _cmd_generate_db_scripts(args: argparse.Namespace, ctx: _CliContext) -> int:
+    paths = generate_db_scripts(load_config(args.config), Path(args.output))
+    for path in paths:
+        print(path)
+    return 0
+
+
+def _cmd_generate_opsi_payloads(args: argparse.Namespace, ctx: _CliContext) -> int:
+    paths = generate_opsi_payloads(load_config(args.config), Path(args.output))
+    for path in paths:
+        print(path)
+    return 0
+
+
+def _db_exec_apply_decisions(args: argparse.Namespace, config: EnablementConfig):
+    if not (args.bastion_id and args.target_ip and args.ssh_key):
+        raise SystemExit("db-exec --apply requires --bastion-id, --target-ip, and --ssh-key")
+    answers = Path(args.answers_file).read_text(encoding="utf-8") if args.answers_file else None
+    runner = BastionSqlRunner(
+        bastion_id=args.bastion_id,
+        target_private_ip=args.target_ip,
+        ssh_key=args.ssh_key,
+        profile=config.profile,
+        region=config.region,
+        answers=answers,
+    )
+    return DbExecService(runner).execute(config, args.scripts_dir, force=args.force)
+
+
+def _cmd_db_exec(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    # Regenerate scripts so the plan reflects the current config.
+    generate_db_scripts(config, Path(args.scripts_dir))
+    if args.apply:
+        decisions = _db_exec_apply_decisions(args, config)
+    else:
+        decisions = DbExecService().plan(config, force=args.force)
+    for decision in decisions:
+        print(f"- db-exec {decision.target}: {decision.action} ({decision.detail})")
+    return 1 if any(d.action == "failed" for d in decisions) else 0
+
+
+def _cmd_data_safe(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    # Reads (list targets/PEs for idempotency) must be live; writes respect --apply.
+    oci = _config_oci(config, ctx, dry_run=not args.apply)
+    service = DataSafeService(
+        oci, credential_provider=_make_data_safe_provider(args.apply, args.user, args.password_env)
+    )
+    decisions = service.enable_all(config)
+    for decision in decisions:
+        print(f"- data-safe {decision.target}: {decision.status} ({decision.detail})")
+    if args.apply:
+        updated = _persist_data_safe_targets(config, decisions)
+        if updated is not config:
+            save_config(args.config, updated)
+            print(f"Updated Data Safe target OCIDs in {args.config}")
+    blocked = [decision for decision in decisions if decision.status == "blocked"]
+    return 1 if blocked else 0
+
+
+def _command_handlers():
+    return {
+        "plan": _cmd_plan,
+        "doctor": _cmd_doctor,
+        "provision": _cmd_provision,
+        "enable": _cmd_enable,
+        "prepare-prereqs": _cmd_prepare_prereqs,
+        "validate": _cmd_validate,
+        "set-credentials": _cmd_set_credentials,
+        "discover": _cmd_discover,
+        "import-tf-outputs": _cmd_import_tf_outputs,
+        "preflight": _cmd_preflight,
+        "configure": _cmd_configure,
+        "generate-agent-scripts": _cmd_generate_agent_scripts,
+        "generate-db-scripts": _cmd_generate_db_scripts,
+        "generate-opsi-payloads": _cmd_generate_opsi_payloads,
+        "db-exec": _cmd_db_exec,
+        "data-safe": _cmd_data_safe,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging()
-    run_id = str(uuid.uuid4())
-    log.debug("run_id=%s", run_id)
-    if args.command == "plan":
-        discovery = OciCli(
-            args.profile,
-            args.region,
-            _make_runner(
-                dry_run=False,
-                run_id=run_id,
-                profile=args.profile,
-                region=args.region,
-                verbose=args.verbose,
-            ),
-        )
-        config = run_wizard(args.profile, args.region, discovery)
-        save_config(args.output, config)
-        print(f"Wrote sanitized config to {args.output}")
-        return 0
-
-    if args.command == "doctor":
-        checks = check_environment()
-        if args.profile:
-            checks = checks + (check_session(args.profile, args.region),)
-        for check in checks:
-            status = "ok" if check.ok else "missing"
-            print(f"{check.name}: {status} ({check.detail})")
-        print(summarize_checks(checks))
-        return 0 if all(check.ok for check in checks) else 1
-
-    if args.command == "provision":
-        config = load_config(args.config)
-        tfvars = write_tfvars(config)
-        print(f"Wrote {tfvars}")
-        if not args.render_only:
-            run_terraform(
-                config,
-                _make_runner(
-                    dry_run=not args.apply and (args.dry_run or config.dry_run),
-                    run_id=run_id,
-                    profile=config.profile,
-                    region=config.region,
-                    verbose=args.verbose,
-                ),
-            )
-        return 0
-
-    if args.command == "enable":
-        config = load_config(args.config)
-        runner = _make_runner(
-            dry_run=not args.apply and (args.dry_run or config.dry_run),
-            run_id=run_id,
-            profile=config.profile,
-            region=config.region,
-            verbose=args.verbose,
-        )
-        EnablementService(OciCli(config.profile, config.region, runner)).enable_all(
-            config, force_reconcile=args.force_reconcile
-        )
-        if args.apply and not args.skip_credentials:
-            # Complete the workflow: set the DBM advanced-diagnostics preferred
-            # credentials (live + idempotent). Best-effort — blocked targets are
-            # reported with remediation rather than failing the enable.
-            live = OciCli(
-                config.profile,
-                config.region,
-                _make_runner(
-                    dry_run=False,
-                    run_id=run_id,
-                    profile=config.profile,
-                    region=config.region,
-                    verbose=args.verbose,
-                ),
-            )
-            for decision in CredentialService(live).set_all(config):
-                print(f"- credentials {decision.target}: {decision.status} ({decision.detail})")
-        return 0
-
-    if args.command == "prepare-prereqs":
-        config = load_config(args.config)
-        runner = _make_runner(
-            dry_run=not args.apply and (args.dry_run or config.dry_run),
-            run_id=run_id,
-            profile=config.profile,
-            region=config.region,
-            verbose=args.verbose,
-        )
-        PrerequisiteService(OciCli(config.profile, config.region, runner)).prepare(config, args.password_env)
-        return 0
-
-    if args.command == "validate":
-        config = load_config(args.config)
-        # validate is read-only: reads must always execute. Building the runner
-        # from args.dry_run would stub every OCI read to {} under
-        # `validate --dry-run`, yielding bogus NOT_FOUND/empty results.
-        # Must stay live: CommandRunner(dry_run=False)
-        runner = _make_runner(
-            dry_run=False,
-            run_id=run_id,
-            profile=config.profile,
-            region=config.region,
-            verbose=args.verbose,
-        )
-        findings = ValidationService(OciCli(config.profile, config.region, runner)).validate(config)
-        for finding in findings:
-            print(f"- {finding}")
-        return 0
-
-    if args.command == "set-credentials":
-        config = load_config(args.config)
-        # Live reads + idempotent writes (named credential reuse, preferred
-        # credential SET is idempotent), so re-runs are safe.
-        oci = OciCli(
-            config.profile,
-            config.region,
-            _make_runner(
-                dry_run=False,
-                run_id=run_id,
-                profile=config.profile,
-                region=config.region,
-                verbose=args.verbose,
-            ),
-        )
-        decisions = CredentialService(oci).set_all(config)
-        for decision in decisions:
-            print(f"- {decision.target}: {decision.status} ({decision.detail})")
-        blocked = [decision for decision in decisions if decision.status == "blocked"]
-        return 1 if blocked else 0
-
-    if args.command == "discover":
-        oci = OciCli(
-            args.profile,
-            args.region,
-            _make_runner(
-                dry_run=False,
-                run_id=run_id,
-                profile=args.profile,
-                region=args.region,
-                verbose=args.verbose,
-            ),
-        )
-        root = args.compartment or args.tenancy
-        if not root:
-            raise SystemExit("discover requires --compartment or --tenancy")
-        compartments = [{"id": root, "name": "root"}]
-        if args.subtree:
-            tenancy = args.tenancy or root
-            compartments += oci.list_compartments(tenancy)
-        inventory = DiscoveryService(oci).discover(compartments)
-        if args.json:
-            print(json.dumps(redact_data(inventory.to_dict()), indent=2, sort_keys=True))
-        else:
-            print_inventory(inventory)
-        return 0
-
-    if args.command == "import-tf-outputs":
-        config = load_config(args.config)
-        terraform_dir = args.terraform_dir or config.terraform_dir
-        outputs = read_terraform_outputs(
-            terraform_dir,
-            _make_runner(
-                dry_run=False,
-                run_id=run_id,
-                profile=config.profile,
-                region=config.region,
-                verbose=args.verbose,
-            ),
-        )
-        merged, changes = merge_outputs_into_config(config, outputs)
-        if not changes:
-            print("No new values to import from terraform outputs.")
-            return 0
-        for change in changes:
-            print(f"Updated {change}")
-        if args.dry_run:
-            print("Dry run: config not written.")
-            return 0
-        save_config(args.config, merged)
-        print(f"Wrote merged config to {args.config}")
-        return 0
-
-    if args.command == "preflight":
-        config = load_config(args.config)
-        db_check = None
-        if args.db_check_file:
-            db_check = parse_validation_output(Path(args.db_check_file).read_text(encoding="utf-8"))
-        service = PreflightService(
-            OciCli(
-                config.profile,
-                config.region,
-                _make_runner(
-                    dry_run=False,
-                    run_id=run_id,
-                    profile=config.profile,
-                    region=config.region,
-                    verbose=args.verbose,
-                ),
-            )
-        )
-        report = service.run(config, db_check=db_check)
-        if args.json:
-            print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
-        else:
-            print_preflight_report(report)
-        return 0 if report.ok else 1
-
-    if args.command == "configure":
-        config = load_config(args.config)
-        mode = "db-side-only" if args.db_side_only else ("apply" if args.apply else "plan")
-        # Reads are always live (read-only); only the enable write respects the mode.
-        read_oci = OciCli(
-            config.profile,
-            config.region,
-            _make_runner(
-                dry_run=False,
-                run_id=run_id,
-                profile=config.profile,
-                region=config.region,
-                verbose=args.verbose,
-            ),
-        )
-        write_oci = OciCli(
-            config.profile,
-            config.region,
-            _make_runner(
-                dry_run=mode != "apply",
-                run_id=run_id,
-                profile=config.profile,
-                region=config.region,
-                verbose=args.verbose,
-            ),
-        )
-        datasafe = None
-        if args.with_data_safe and any(target.wants("datasafe") for target in config.targets):
-            datasafe = DataSafeService(
-                write_oci,
-                credential_provider=_make_data_safe_provider(
-                    mode == "apply", args.data_safe_user, args.data_safe_password_env
-                ),
-            )
-        service = ConfigureService(read_oci, EnablementService(write_oci), datasafe=datasafe)
-        report: ConfigureReport = service.configure(
-            config, mode=mode, handoff_dir=args.output, force=args.force
-        )
-        if args.json:
-            print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
-        else:
-            print_configure_report(report)
-        return 0 if report.ok else 1
-
-    if args.command == "generate-agent-scripts":
-        config = load_config(args.config)
-        paths = generate_agent_scripts(config, Path(args.output))
-        for path in paths:
-            print(path)
-        return 0
-
-    if args.command == "generate-db-scripts":
-        config = load_config(args.config)
-        paths = generate_db_scripts(config, Path(args.output))
-        for path in paths:
-            print(path)
-        return 0
-
-    if args.command == "generate-opsi-payloads":
-        config = load_config(args.config)
-        paths = generate_opsi_payloads(config, Path(args.output))
-        for path in paths:
-            print(path)
-        return 0
-
-    if args.command == "db-exec":
-        config = load_config(args.config)
-        # Regenerate scripts so the plan reflects the current config, then show the
-        # per-target run plan. Actual auto-execution against the DB runs through the
-        # Bastion procedure / handoff packet (see generated <target>/HANDOFF.md).
-        generate_db_scripts(config, Path(args.scripts_dir))
-        if args.apply:
-            if not (args.bastion_id and args.target_ip and args.ssh_key):
-                raise SystemExit("db-exec --apply requires --bastion-id, --target-ip, and --ssh-key")
-            answers = Path(args.answers_file).read_text(encoding="utf-8") if args.answers_file else None
-            runner = BastionSqlRunner(
-                bastion_id=args.bastion_id, target_private_ip=args.target_ip, ssh_key=args.ssh_key,
-                profile=config.profile, region=config.region, answers=answers,
-            )
-            decisions = DbExecService(runner).execute(config, args.scripts_dir, force=args.force)
-        else:
-            decisions = DbExecService().plan(config, force=args.force)
-        for decision in decisions:
-            print(f"- db-exec {decision.target}: {decision.action} ({decision.detail})")
-        return 1 if any(d.action == "failed" for d in decisions) else 0
-
-    if args.command == "data-safe":
-        config = load_config(args.config)
-        # Reads (list targets/PEs for idempotency) must be live; writes respect
-        # --apply via the runner so a dry-run prints commands without registering.
-        runner = _make_runner(
-            dry_run=not args.apply,
-            run_id=run_id,
-            profile=config.profile,
-            region=config.region,
-            verbose=args.verbose,
-        )
-        oci = OciCli(config.profile, config.region, runner)
-        service = DataSafeService(
-            oci, credential_provider=_make_data_safe_provider(args.apply, args.user, args.password_env)
-        )
-        decisions = service.enable_all(config)
-        for decision in decisions:
-            print(f"- data-safe {decision.target}: {decision.status} ({decision.detail})")
-        if args.apply:
-            updated = _persist_data_safe_targets(config, decisions)
-            if updated is not config:
-                save_config(args.config, updated)
-                print(f"Updated Data Safe target OCIDs in {args.config}")
-        blocked = [decision for decision in decisions if decision.status == "blocked"]
-        return 1 if blocked else 0
-
-    raise ValueError(f"Unhandled command {args.command}")
+    ctx = _CliContext(run_id=str(uuid.uuid4()), verbose=args.verbose)
+    log.debug("run_id=%s", ctx.run_id)
+    handler = _command_handlers().get(args.command)
+    if handler is None:
+        raise ValueError(f"Unhandled command {args.command}")
+    return handler(args, ctx)
 
 
 if __name__ == "__main__":
