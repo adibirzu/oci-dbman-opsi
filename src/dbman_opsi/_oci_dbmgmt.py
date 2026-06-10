@@ -68,7 +68,7 @@ class DatabaseManagementCommands(_OciBase):
 
         for existing in self.list_named_credentials(compartment_id):
             if existing.get("name") == name:
-                return str(existing.get("id"))
+                return str(existing.get("id") or "")
         data = self.run_json([
             "database-management", "named-credential",
             "create-named-credential-basic-named-credential-content",
@@ -82,7 +82,9 @@ class DatabaseManagementCommands(_OciBase):
             "--content-password-secret-access-mode", access_mode,
             "--associated-resource", associated_resource,
         ])
-        return str(self._data(data).get("id"))
+        # Empty string (not "None") when no id is returned, matching the Data Safe
+        # create helpers — callers test truthiness to mean "created/exists".
+        return str(self._data(data).get("id") or "")
 
     def list_preferred_credentials(self, managed_database_id: str) -> list[dict[str, Any]]:
         data = self.run_json([
