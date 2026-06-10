@@ -56,6 +56,40 @@ def test_runner_creates_session_tunnel_runs_scripts_and_tears_down(tmp_path: Pat
     assert "OK" in out
 
 
+def test_runner_uses_tofu_known_hosts_never_dev_null(tmp_path: Path) -> None:
+    # §3 HIGH fix: host-key verification must be TOFU (accept-new) into a per-run
+    # known_hosts file on EVERY hop — never StrictHostKeyChecking=no / /dev/null.
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    kh = tmp_path / "kh"
+    ex = _FakeExec()
+
+    _runner(ex, known_hosts=str(kh)).__call__(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    hops = ex.bg + [c for c in ex.fg if c and c[0] in {"ssh", "scp"}]
+    assert hops, "expected tunnel + scp + ssh hops"
+    for hop in hops:
+        joined = " ".join(hop)
+        assert "StrictHostKeyChecking=no" not in joined
+        assert "UserKnownHostsFile=/dev/null" not in joined
+        assert "StrictHostKeyChecking=accept-new" in joined
+        assert f"UserKnownHostsFile={kh}" in joined
+
+
+def test_runner_auto_creates_per_run_known_hosts_when_unset(tmp_path: Path) -> None:
+    # With no known_hosts supplied, the runner provisions its own per-run file
+    # (required because the loopback tunnel maps to a different host each run).
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    ex = _FakeExec()
+
+    _runner(ex).__call__(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    scp = next(c for c in ex.fg if c and c[0] == "scp")
+    kh_opt = next(a for a in scp if a.startswith("UserKnownHostsFile="))
+    path = kh_opt.split("=", 1)[1]
+    assert path not in {"/dev/null", ""}
+    assert not Path(path).exists()  # per-run file cleaned up in finally
+
+
 def test_runner_tears_down_even_when_a_script_fails(tmp_path: Path) -> None:
     s1 = tmp_path / "01.sql"; s1.write_text("-- a")
     ex = _FakeExec()
