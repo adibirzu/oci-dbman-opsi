@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 from dbman_opsi.config import (
     DEFAULT_SERVICES,
@@ -35,7 +36,9 @@ def _ask_services() -> tuple[Service, ...]:
     return chosen or DEFAULT_SERVICES  # type: ignore[return-value]
 
 
-def _safe_discover(description: str, callback) -> list[dict[str, object]]:
+def _safe_discover(
+    description: str, callback: Callable[[], list[dict[str, object]]]
+) -> list[dict[str, object]]:
     try:
         return callback()
     except Exception as exc:
@@ -89,7 +92,7 @@ def _search_scope(
 def _discover_across_compartments(
     description: str,
     compartments: list[dict[str, object]],
-    callback,
+    callback: Callable[[str], list[dict[str, object]]],
 ) -> list[dict[str, object]]:
     discovered: list[dict[str, object]] = []
     for compartment in compartments:
@@ -256,7 +259,9 @@ def _discover_target_choices(kind: str, compartments: list[dict[str, object]], o
     return []
 
 
-def _list_optional(oci: OciCli | None, description: str, callback) -> list[dict[str, object]]:
+def _list_optional(
+    oci: OciCli | None, description: str, callback: Callable[[], list[dict[str, object]]]
+) -> list[dict[str, object]]:
     return _safe_discover(description, callback) if oci else []
 
 
