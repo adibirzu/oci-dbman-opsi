@@ -1,14 +1,18 @@
+import logging
+
 from dbman_opsi.runner import CommandRunner
 
 
-def test_dry_run_runner_prints_redacted_command(capsys) -> None:
+def test_dry_run_runner_logs_redacted_command(caplog) -> None:
     runner = CommandRunner(dry_run=True)
+    caplog.set_level(logging.INFO, logger="dbman_opsi.runner")
 
     result = runner.run(["oci", "db", "get", "--database-id", "ocid1" + ".database.oc1..example"])
 
     assert result.returncode == 0
     assert result.json() == {}
-    assert "ocid1" + "." not in capsys.readouterr().out
+    assert "ocid1" + "." not in caplog.text
+    assert "+ oci db get" in caplog.text
 
 
 def test_runner_raises_on_failed_command() -> None:

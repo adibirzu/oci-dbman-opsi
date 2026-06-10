@@ -1,4 +1,5 @@
 import json
+import uuid
 from pathlib import Path
 
 from dbman_opsi.checks import PreflightReport, fail, ok
@@ -38,6 +39,53 @@ def test_cli_provision_render_only(tmp_path: Path) -> None:
 
     assert main(["provision", "--config", str(config_path), "--render-only"]) == 0
     assert (terraform_dir / "terraform.tfvars.json").exists()
+
+
+def test_cli_threads_single_run_id_into_journaled_runners(tmp_path: Path, monkeypatch) -> None:
+    terraform_dir = tmp_path / "tf"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            terraform_dir=str(terraform_dir),
+            dry_run=True,
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("dbman_opsi.cli.uuid.uuid4", lambda: uuid.UUID("12345678-1234-5678-1234-567812345678"))
+
+    assert main(["provision", "--config", str(config_path)]) == 0
+
+    journal_path = tmp_path / "runs" / "12345678-1234-5678-1234-567812345678.jsonl"
+    entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert entries
+    assert {entry["run_id"] for entry in entries} == {"12345678-1234-5678-1234-567812345678"}
+    assert {entry["profile"] for entry in entries} == {"DEFAULT"}
+    assert {entry["region"] for entry in entries} == {"eu-frankfurt-1"}
+    assert all(entry["dry_run"] is True for entry in entries)
+
+
+def test_cli_verbose_surfaces_command_timing(tmp_path: Path, monkeypatch, capsys) -> None:
+    terraform_dir = tmp_path / "tf"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id="compartment-id",
+            terraform_dir=str(terraform_dir),
+            dry_run=True,
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["provision", "--verbose", "--config", str(config_path)]) == 0
+
+    assert "duration_ms=" in capsys.readouterr().out
 
 
 def test_cli_generate_db_scripts(tmp_path: Path) -> None:

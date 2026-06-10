@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from dbman_opsi.config import EnablementConfig, Target
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.status import dbm_status
+
+log = logging.getLogger(__name__)
 
 CLOUD_REQUIRED_FIELDS = ("resource_id", "password_secret_id", "private_endpoint_id", "service_name", "monitoring_user")
 
@@ -187,9 +190,12 @@ class EnablementService:
             # per target, so skip it when monitoring is already healthy — only
             # reconcile to repair a broken connection (or when forced).
             if not force_reconcile and self._dbm_monitoring_healthy(target):
-                print(f"Database Management already enabled and monitoring healthy for {target.name}; skipping reconcile")
+                log.info(
+                    "Database Management already enabled and monitoring healthy for %s; skipping reconcile",
+                    target.name,
+                )
             else:
-                print(f"Database Management already enabled for {target.name}; reconciling connection")
+                log.info("Database Management already enabled for %s; reconciling connection", target.name)
                 self.oci.run(cloud_modify_command(target))
         elif applied:
             # Freshly enabled: wait until DBM reports ENABLED (managed database
@@ -251,12 +257,12 @@ class EnablementService:
             if not value
         ]
         if shared_missing:
-            print(f"Skipping Ops Insights for {target.name}; missing: {', '.join(shared_missing)}")
+            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(shared_missing))
             return
         if self._opsi_insight_active(target):
             # Idempotent: an ACTIVE insight already collects, so do not re-create
             # (create-pe-comanaged on an existing insight conflicts / hangs).
-            print(f"Ops Insights insight already ACTIVE for {target.name}; skipping create")
+            log.info("Ops Insights insight already ACTIVE for %s; skipping create", target.name)
             return
         if not target.opsi_database_insight_id:
             self._create_opsi_pe_comanaged(target)
@@ -331,7 +337,7 @@ class EnablementService:
             if not value
         ]
         if missing:
-            print(f"Skipping Ops Insights for {target.name}; missing: {', '.join(missing)}")
+            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(missing))
             return
         args = [
             "opsi",
@@ -369,18 +375,20 @@ class EnablementService:
             try:
                 created = self.oci.run_tolerating(args, tolerated=("already exists",))
                 if not created:
-                    print(f"Ops Insights insight already exists for {target.name}; left as-is")
+                    log.info("Ops Insights insight already exists for %s; left as-is", target.name)
                 return
             except RuntimeError as exc:
                 is_propagation = any(marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS)
                 if is_propagation and attempt < self.opsi_create_attempts - 1:
-                    print(
-                        f"Ops Insights not ready for {target.name} (database registering); "
-                        f"retry {attempt + 1}/{self.opsi_create_attempts - 1}"
+                    log.info(
+                        "Ops Insights not ready for %s (database registering); retry %s/%s",
+                        target.name,
+                        attempt + 1,
+                        self.opsi_create_attempts - 1,
                     )
                     self._sleep(self.opsi_create_delay)
                     continue
                 raise
 
     def _print_external_next_step(self, target: Target) -> None:
-        print(f"External target {target.name}: run generated Management Agent script, then rerun validate.")
+        log.info("External target %s: run generated Management Agent script, then rerun validate.", target.name)
