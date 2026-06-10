@@ -1,3 +1,5 @@
+import logging
+
 from dbman_opsi.config import Target
 from dbman_opsi.enablement import EnablementService
 
@@ -126,7 +128,7 @@ def test_enable_cloud_database_creates_opsi_insight_when_missing_id() -> None:
     assert "file://credential-details.json" in oci.commands[1]
 
 
-def test_enable_cloud_database_tolerates_dbm_already_enabled(capsys) -> None:
+def test_enable_cloud_database_tolerates_dbm_already_enabled(caplog) -> None:
     # Database Management enable returns 409 "already enabled"; the run must
     # swallow it and still issue the Ops Insights create (idempotent re-run).
     oci = FakeOci(
@@ -137,6 +139,7 @@ def test_enable_cloud_database_tolerates_dbm_already_enabled(capsys) -> None:
         ),
     )
     service = EnablementService(oci)  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
     target = Target(
         kind="dbcs",
         name="db1",
@@ -158,7 +161,7 @@ def test_enable_cloud_database_tolerates_dbm_already_enabled(capsys) -> None:
     assert oci.commands[1][:3] == ["db", "database", "modify-database-management"]
     assert "--service-name" in oci.commands[1]
     assert oci.commands[2][:3] == ["opsi", "database-insights", "create-pe-comanged-database"]
-    assert "already enabled" in capsys.readouterr().out
+    assert "already enabled" in caplog.text
 
 
 def _already_enabled_cdb_oci(db_status: str) -> FakeOci:
@@ -186,16 +189,17 @@ def _cdb_already_enabled_target() -> Target:
     )
 
 
-def test_enable_skips_reconcile_when_monitoring_healthy(capsys) -> None:
+def test_enable_skips_reconcile_when_monitoring_healthy(caplog) -> None:
     oci = _already_enabled_cdb_oci(db_status="UP")
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
     EnablementService(oci).enable_target(_cdb_already_enabled_target())  # type: ignore[arg-type]
 
     # DBM already enabled + healthy -> no modify reconcile.
     assert not any("modify-database-management" in c for c in oci.commands)
-    assert "skipping reconcile" in capsys.readouterr().out
+    assert "skipping reconcile" in caplog.text
 
 
-def test_enable_reconciles_when_monitoring_not_healthy(capsys) -> None:
+def test_enable_reconciles_when_monitoring_not_healthy() -> None:
     oci = _already_enabled_cdb_oci(db_status="DOWN")
     EnablementService(oci).enable_target(_cdb_already_enabled_target())  # type: ignore[arg-type]
 
@@ -263,9 +267,10 @@ def test_enable_cloud_database_reraises_untolerated_error() -> None:
         raise AssertionError("Expected RuntimeError to propagate")
 
 
-def test_enable_skips_opsi_create_when_insight_already_active(capsys) -> None:
+def test_enable_skips_opsi_create_when_insight_already_active(caplog) -> None:
     oci = FakeOci(insights=[{"database-id": "database-id", "lifecycle-state": "ACTIVE"}])
     service = EnablementService(oci)  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
     target = Target(
         kind="dbcs",
         name="db1",
@@ -285,10 +290,10 @@ def test_enable_skips_opsi_create_when_insight_already_active(capsys) -> None:
     # DBM enable runs; OPSI create is skipped because an ACTIVE insight exists.
     assert oci.commands[0][:3] == ["db", "database", "enable-database-management"]
     assert not any("create-pe-comanged-database" in c for c in oci.commands)
-    assert "already ACTIVE" in capsys.readouterr().out
+    assert "already ACTIVE" in caplog.text
 
 
-def test_enable_active_check_uses_reliable_get_when_insight_ocid_known(capsys) -> None:
+def test_enable_active_check_uses_reliable_get_when_insight_ocid_known(caplog) -> None:
     # When the insight OCID is configured, the active-check reads it via the
     # reliable GET and never consults the flaky list — so a partial list that
     # dropped the insight cannot drive an unnecessary create.
@@ -307,6 +312,7 @@ def test_enable_active_check_uses_reliable_get_when_insight_ocid_known(capsys) -
 
     oci = FakeOciGet({"lifecycle-state": "ACTIVE"})
     service = EnablementService(oci)  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
     target = Target(
         kind="dbcs",
         name="db1",
@@ -326,12 +332,13 @@ def test_enable_active_check_uses_reliable_get_when_insight_ocid_known(capsys) -
 
     assert not any("create-pe-comanged-database" in c for c in oci.commands)
     assert oci.list_calls == 0  # reliable GET used, flaky list never touched
-    assert "already ACTIVE" in capsys.readouterr().out
+    assert "already ACTIVE" in caplog.text
 
 
-def test_enable_cloud_database_skips_opsi_when_payloads_missing(capsys) -> None:
+def test_enable_cloud_database_skips_opsi_when_payloads_missing(caplog) -> None:
     oci = FakeOci()
     service = EnablementService(oci)  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
     target = Target(
         kind="dbcs",
         name="db1",
@@ -345,7 +352,7 @@ def test_enable_cloud_database_skips_opsi_when_payloads_missing(capsys) -> None:
     service.enable_target(target)
 
     assert len(oci.commands) == 1
-    assert "Skipping Ops Insights" in capsys.readouterr().out
+    assert "Skipping Ops Insights" in caplog.text
 
 
 def test_enable_pdb_uses_pluggable_verb_without_management_type() -> None:
@@ -372,12 +379,13 @@ def test_enable_pdb_uses_pluggable_verb_without_management_type() -> None:
     assert "--management-type" not in command
 
 
-def test_enable_external_prints_next_step(capsys) -> None:
+def test_enable_external_logs_next_step(caplog) -> None:
     service = EnablementService(FakeOci())  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="dbman_opsi.enablement")
 
     service.enable_target(Target(kind="external-db", name="external"))
 
-    assert "run generated Management Agent script" in capsys.readouterr().out
+    assert "run generated Management Agent script" in caplog.text
 
 
 def test_enable_rejects_unknown_target_kind() -> None:
