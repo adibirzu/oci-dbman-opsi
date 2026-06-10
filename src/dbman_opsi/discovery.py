@@ -8,12 +8,40 @@ Agents, and bastions.
 
 from __future__ import annotations
 
+import concurrent.futures
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from dbman_opsi.conn import service_name_from_record
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+# Default fan-out for compartment discovery. Each compartment is ~10 independent
+# read calls (each a cold `oci` subprocess), so on a many-compartment tenancy the
+# serial cost is O(compartments) minutes. OciCli is stateless (every call spawns
+# its own process), so compartments parallelize safely.
+_DEFAULT_MAX_WORKERS = 8
+
+
+def _parallel_map(func: Callable[[_T], _R], items: Iterable[_T], max_workers: int) -> list[_R]:
+    """Order-preserving parallel map; serial for trivial inputs.
+
+    Parallelism is applied at the compartment level only — deliberately *not*
+    nested into per-compartment calls, because nested submission to a second
+    ThreadPoolExecutor can deadlock when outer worker threads block on inner
+    results. ``executor.map`` preserves input order, so results are deterministic.
+    """
+
+    materialized = list(items)
+    if max_workers <= 1 or len(materialized) <= 1:
+        return [func(item) for item in materialized]
+    workers = min(max_workers, len(materialized))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(func, materialized))
 
 
 def _safe(call: Callable[[], Any], default: Any, attempts: int = 2) -> Any:
@@ -153,11 +181,15 @@ class Inventory:
 
 
 class DiscoveryService:
-    def __init__(self, oci: OciCli) -> None:
+    def __init__(self, oci: OciCli, max_workers: int = _DEFAULT_MAX_WORKERS) -> None:
         self.oci = oci
+        self.max_workers = max_workers
 
     def discover(self, compartments: list[dict[str, Any]]) -> Inventory:
-        return Inventory(compartments=tuple(self._compartment(c) for c in compartments))
+        # Compartments are independent and OciCli is stateless, so fan out across
+        # them; _parallel_map preserves order and is a no-op for a single one.
+        results = _parallel_map(self._compartment, compartments, self.max_workers)
+        return Inventory(compartments=tuple(results))
 
     def _compartment(self, compartment: dict[str, Any]) -> CompartmentInventory:
         cid = str(compartment.get("id"))
