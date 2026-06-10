@@ -90,6 +90,37 @@ def test_runner_auto_creates_per_run_known_hosts_when_unset(tmp_path: Path) -> N
     assert not Path(path).exists()  # per-run file cleaned up in finally
 
 
+def test_runner_removes_remote_scripts_after_run(tmp_path: Path) -> None:
+    # §3 MED: uploaded scripts must not linger in /tmp on the DB host.
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    s2 = tmp_path / "06.sql"; s2.write_text("-- b")
+    ex = _FakeExec()
+
+    _runner(ex).__call__(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1, s2])
+
+    flat = " | ".join(" ".join(c) for c in ex.fg)
+    assert "rm -f /tmp/01.sql /tmp/06.sql" in flat
+
+
+def test_runner_registers_idempotent_atexit_teardown(tmp_path: Path) -> None:
+    # §1 HIGH: an interpreter exit must still delete the bastion session, and the
+    # atexit hook must not double-delete when the normal finally already ran.
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    ex = _FakeExec()
+    registered: list = []
+
+    _runner(ex, atexit_register=registered.append).__call__(
+        Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1]
+    )
+
+    deletes_during_run = sum("session delete" in " ".join(c) for c in ex.fg)
+    assert deletes_during_run == 1               # torn down once by the finally
+    assert registered, "expected an atexit teardown to be registered"
+    registered[0]()                              # simulate interpreter exit
+    deletes_after = sum("session delete" in " ".join(c) for c in ex.fg)
+    assert deletes_after == 1                     # idempotent: no second delete
+
+
 def test_runner_tears_down_even_when_a_script_fails(tmp_path: Path) -> None:
     s1 = tmp_path / "01.sql"; s1.write_text("-- a")
     ex = _FakeExec()
