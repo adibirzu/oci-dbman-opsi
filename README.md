@@ -42,7 +42,7 @@ These screenshots are captured from local public documentation only. They do not
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+python -m pip install -e '.[dev]'
 
 dbman-opsi doctor
 dbman-opsi discover --profile <OCI_PROFILE> --region <OCI_REGION> --compartment <OCID>  # 3-pillar inventory
@@ -58,6 +58,25 @@ dbman-opsi enable --config dbman-opsi.local.yaml --dry-run
 dbman-opsi data-safe --config dbman-opsi.local.yaml          # register Data Safe targets (datasafe pillar)
 dbman-opsi validate --config dbman-opsi.local.yaml
 ```
+
+Quote `'.[dev]'` in zsh and other shells that expand square brackets. After
+activating `.venv`, use `python -m pip` so pip installs into the active virtual
+environment; the interpreter path is `.venv/bin/python` before activation.
+
+`plan` is the guided discovery path. It automatically uses the tenancy OCID from
+the selected OCI profile when available, lists active compartments, searches the selected
+compartment first, then searches other accessible compartments for reusable
+resources. It lets you select existing VCNs, subnets, Vault keys, Vault secrets,
+Database Management private endpoints, Ops Insights private endpoints, Data Safe
+private endpoints, and database targets. If VCNs already exist, the network
+prompt defaults to reusing one instead of creating a PoC network. The wizard also
+discovers IAM policies, reports whether the DBM/OPSI service-principal
+statements are present, and reuses a discovered policy group name for generated
+policy documents. For DBCS and Exadata, select the actual database/CDB target,
+not the parent DB system OCID; the wizard tracks the DB system separately when
+Data Safe needs it and can add PDB targets in the PDB discovery step. If
+discovery cannot read a resource type, the wizard falls back to manual OCID
+entry.
 
 `configure` is the orchestrated path: it detects whether each database exists and is
 already enabled, branches by location (OCI-native direct vs external Management Agent),
@@ -79,7 +98,7 @@ Use `--apply` only after reviewing dry-run output.
 Cloud Shell already includes OCI CLI. Install the package and verify prerequisites:
 
 ```bash
-python3 -m pip install -e .[dev]
+python3 -m pip install -e '.[dev]'
 dbman-opsi doctor
 ```
 
@@ -95,7 +114,7 @@ For your public fork, update the button URL to your repository archive URL.
 
 - `doctor`: check Python, OCI CLI, and Terraform availability. Pass `--profile`/`--region` to also confirm the OCI session is authenticated (not just installed).
 - `discover`: read-only inventory of reusable resources (subnets, vaults, databases, endpoints, agents, bastions). Reports the **three-pillar status per database** — `dbm_status`, `opsi_status`, `data_safe_status`, plus `enabled_services`/`missing_services` — so you can see at a glance what is on. `--json` for automation (OCIDs redacted in JSON), `--subtree` to scan a compartment tree.
-- `plan`: discover compartments, networks, databases, Vaults, private endpoints, and agents, then write a config. Prompts per target for which pillars to enable (`dbm`/`opsi`/`datasafe`) and credentials. For DBCS/Exadata it can also discover pluggable databases (PDBs) and add them as PDB targets linked to their parent CDB.
+- `plan`: discover tenancy/profile context, active compartments, IAM policies, networks, databases, Vaults, Vault secrets, private endpoints, and agents across accessible compartments, then write a config. Prompts per target for which pillars to enable (`dbm`/`opsi`/`datasafe`) and credentials. For DBCS/Exadata it selects database/CDB resources, keeps the parent DB system separately for Data Safe, and can discover pluggable databases (PDBs) as linked child targets.
 - `provision`: render Terraform variables and optionally run Terraform.
 - `import-tf-outputs`: read `terraform output` and merge the created OCIDs (subnet, VCN, Database Management private endpoint, provisioned database IDs) back into the config so `enable`/`configure` pick them up without manual copy.
 - `prepare-prereqs`: create service-side private endpoints and optional Vault secrets from an environment variable.
