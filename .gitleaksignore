@@ -1,0 +1,11 @@
+# gitleaks finding fingerprints to ignore (format: commit:file:rule:line).
+#
+# ab5a600 inlined a known OCIR tenancy *namespace* token into docs/CI.md as a
+# documentation example. It is not a credential, and the identical literal is
+# carried intentionally in .gitleaks.toml (the detection regex itself), so the
+# value is unavoidably present in the repo by design — scrubbing only the docs
+# copy from history would be symbolic while risking the detector. The working
+# tree already replaces the docs occurrence with a <TENANCY_NAMESPACE>
+# placeholder; this fingerprint suppresses only that one historical occurrence.
+# The scanner stays fully active for every other doc/secret.
+ab5a6003e4801ca47b0d99cf93ec7fd42ab38690:docs/CI.md:oci-tenancy-namespace:77
