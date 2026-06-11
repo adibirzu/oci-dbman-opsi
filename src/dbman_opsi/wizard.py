@@ -16,6 +16,7 @@ from dbman_opsi.config import (
 )
 from dbman_opsi.conn import service_name_from_record
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.oci_util import safe_lookup
 
 _VALID_SERVICES = ("dbm", "opsi", "datasafe")
 _DEFAULT_POLICY_GROUP = "dbman-opsi-admins"
@@ -60,11 +61,10 @@ def _ask_services() -> tuple[Service, ...]:
 def _safe_discover(
     description: str, callback: Callable[[], list[dict[str, object]]]
 ) -> list[dict[str, object]]:
-    try:
-        return callback()
-    except Exception as exc:
+    def print_error(exc: Exception) -> None:
         print(f"Could not discover {description}: {exc}")
-        return []
+
+    return safe_lookup(callback, [], on_error=print_error)
 
 
 def _active(items: list[dict[str, object]]) -> list[dict[str, object]]:

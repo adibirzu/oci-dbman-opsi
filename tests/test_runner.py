@@ -1,6 +1,15 @@
 import logging
 
-from dbman_opsi.runner import CommandRunner
+import pytest
+
+from dbman_opsi.runner import (
+    CommandRunner,
+    OciAuthError,
+    OciError,
+    OciNotFound,
+    OciThrottled,
+    OciTransient,
+)
 
 
 def test_dry_run_runner_logs_redacted_command(caplog) -> None:
@@ -47,3 +56,24 @@ def test_runner_redacts_failed_command() -> None:
         assert "ocid1" + "." not in str(exc)
     else:
         raise AssertionError("Expected RuntimeError")
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error_type"),
+    [
+        ("ServiceError: NotAuthenticated: session expired", OciAuthError),
+        ("ServiceError: Forbidden: missing policy", OciAuthError),
+        ("ServiceError: NotFound: target database not found", OciNotFound),
+        ("ServiceError: 404: target not found", OciNotFound),
+        ("ServiceError: TooManyRequests: retry later", OciThrottled),
+        ("ServiceError: 429: request throttled", OciThrottled),
+        ("ServiceError: 503 Service Unavailable", OciTransient),
+        ("connection timeout while calling OCI", OciTransient),
+        ("ServiceError: Unknown failure", OciError),
+    ],
+)
+def test_runner_classifies_oci_errors(stderr: str, error_type: type[OciError]) -> None:
+    runner = CommandRunner(dry_run=False)
+
+    with pytest.raises(error_type):
+        runner.run(["python3", "-c", f"import sys; sys.stderr.write({stderr!r}); sys.exit(7)"])

@@ -15,6 +15,7 @@ from typing import Any, Callable, TypeVar
 
 from dbman_opsi.conn import service_name_from_record
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.oci_util import safe_lookup
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status
 
 _T = TypeVar("_T")
@@ -47,13 +48,7 @@ def _parallel_map(func: Callable[[_T], _R], items: Iterable[_T], max_workers: in
 def _safe(call: Callable[[], Any], default: Any, attempts: int = 2) -> Any:
     """Run a read-only lookup, retrying once to ride out transient OCI 404/5xx blips."""
 
-    for attempt in range(attempts):
-        try:
-            return call()
-        except Exception:  # noqa: BLE001 - discovery is best-effort and read-only
-            if attempt == attempts - 1:
-                return default
-    return default
+    return safe_lookup(call, default, attempts=attempts)
 
 
 @dataclass(frozen=True)
@@ -188,23 +183,35 @@ class DiscoveryService:
     def discover(self, compartments: list[dict[str, Any]]) -> Inventory:
         # Compartments are independent and OciCli is stateless, so fan out across
         # them; _parallel_map preserves order and is a no-op for a single one.
-        results = _parallel_map(self._compartment, compartments, self.max_workers)
+        data_safe_targets = self._data_safe_targets_by_compartment(compartments)
+        results = _parallel_map(
+            lambda compartment: self._compartment(
+                compartment,
+                data_safe_targets.get(str(compartment.get("id")), []),
+            ),
+            compartments,
+            self.max_workers,
+        )
         return Inventory(compartments=tuple(results))
 
-    def _compartment(self, compartment: dict[str, Any]) -> CompartmentInventory:
+    def _compartment(
+        self,
+        compartment: dict[str, Any],
+        data_safe_targets: list[dict[str, Any]] | None = None,
+    ) -> CompartmentInventory:
         cid = str(compartment.get("id"))
         # Pre-fetch the standalone OPSI insight and Data Safe target collections
         # once, then join them back to each DB by OCID (avoids an N+1 lookup per
         # database). Best-effort: an empty read just yields NOT_ENABLED statuses.
         insights = _safe(lambda: self.oci.list_opsi_database_insights(cid), [])
-        data_safe_targets = self._data_safe_targets_enriched(cid)
+        targets = data_safe_targets if data_safe_targets is not None else self._data_safe_targets_enriched(cid)
         return CompartmentInventory(
             name=str(compartment.get("name", "")),
             id=cid,
             subnets=self._subnets(cid),
             vaults=self._vaults(cid),
-            databases=self._databases(cid, insights, data_safe_targets),
-            autonomous=self._autonomous(cid, insights, data_safe_targets),
+            databases=self._databases(cid, insights, targets),
+            autonomous=self._autonomous(cid, insights, targets),
             dbm_private_endpoints=tuple(_safe(lambda: self.oci.list_db_management_private_endpoints(cid), [])),
             opsi_private_endpoints=tuple(_safe(lambda: self.oci.list_opsi_private_endpoints(cid), [])),
             data_safe_private_endpoints=tuple(_safe(lambda: self.oci.list_data_safe_private_endpoints(cid), [])),
@@ -266,15 +273,66 @@ class DiscoveryService:
         """
 
         targets = _safe(lambda: self.oci.list_data_safe_targets(cid), [])
-        enriched: list[dict[str, Any]] = []
-        for target in targets:
-            target_id = str(target.get("id"))
-            full = _safe(lambda tid=target_id: self.oci.get_data_safe_target(tid), {})
-            if isinstance(full, dict) and full.get("database-details"):
-                enriched.append({**target, "database-details": full.get("database-details")})
-            else:
-                enriched.append(target)
-        return enriched
+        return self._enrich_data_safe_target_batches(((cid, tuple(targets)),)).get(cid, [])
+
+    def _data_safe_targets_by_compartment(
+        self,
+        compartments: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        batches = tuple(
+            (
+                str(compartment.get("id")),
+                tuple(_safe(lambda cid=str(compartment.get("id")): self.oci.list_data_safe_targets(cid), [])),
+            )
+            for compartment in compartments
+        )
+        return self._enrich_data_safe_target_batches(batches)
+
+    def _enrich_data_safe_target_batches(
+        self,
+        batches: tuple[tuple[str, tuple[dict[str, Any], ...]], ...],
+    ) -> dict[str, list[dict[str, Any]]]:
+        jobs = tuple(
+            (cid, index, target)
+            for cid, targets in batches
+            for index, target in enumerate(targets)
+        )
+        if not jobs:
+            return {cid: [] for cid, _targets in batches}
+        if self.max_workers <= 1 or len(jobs) <= 1:
+            results = {
+                (cid, index): self._data_safe_target_enriched(target)
+                for cid, index, target in jobs
+            }
+        else:
+            results = self._parallel_data_safe_gets(jobs)
+        return {
+            cid: [results[(cid, index)] for index in range(len(targets))]
+            for cid, targets in batches
+        }
+
+    def _parallel_data_safe_gets(
+        self,
+        jobs: tuple[tuple[str, int, dict[str, Any]], ...],
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        workers = min(self.max_workers, len(jobs))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_key = {
+                executor.submit(self._data_safe_target_enriched, target): (cid, index)
+                for cid, index, target in jobs
+            }
+            pairs = tuple(
+                (future_to_key[future], future.result())
+                for future in concurrent.futures.as_completed(future_to_key)
+            )
+        return dict(pairs)
+
+    def _data_safe_target_enriched(self, target: dict[str, Any]) -> dict[str, Any]:
+        target_id = str(target.get("id"))
+        full = _safe(lambda tid=target_id: self.oci.get_data_safe_target(tid), {})
+        if isinstance(full, dict) and full.get("database-details"):
+            return {**target, "database-details": full.get("database-details")}
+        return target
 
     _service_name = staticmethod(service_name_from_record)
 

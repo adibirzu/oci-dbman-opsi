@@ -1,5 +1,5 @@
 from dbman_opsi.oci_cli import OciCli
-from dbman_opsi.runner import CommandResult
+from dbman_opsi.runner import CommandResult, OciError
 
 
 class FakeRunner:
@@ -176,6 +176,39 @@ def test_oci_cli_data_safe_list_and_get_command_shapes() -> None:
     assert oci_get.get_data_safe_target("dst-1") == {"id": "dst-1"}
     cmd = runner_get.commands[0]
     assert cmd[5:9] == ["data-safe", "target-database", "get", "--target-database-id"]
+
+
+class _FailingRunner:
+    def __init__(self, error: RuntimeError):
+        self.error = error
+
+    def run(self, args, cwd=None, check=True):
+        raise self.error
+
+
+def test_run_tolerating_handles_typed_oci_error() -> None:
+    oci = OciCli(
+        "cap",
+        "eu-frankfurt-1",
+        _FailingRunner(OciError("already enabled")),
+    )  # type: ignore[arg-type]
+
+    assert oci.run_tolerating(["db", "enable"], tolerated=("already enabled",)) is False
+
+
+def test_run_tolerating_does_not_swallow_plain_runtime_error() -> None:
+    oci = OciCli(
+        "cap",
+        "eu-frankfurt-1",
+        _FailingRunner(RuntimeError("already enabled")),
+    )  # type: ignore[arg-type]
+
+    try:
+        oci.run_tolerating(["db", "enable"], tolerated=("already enabled",))
+    except RuntimeError as exc:
+        assert "already enabled" in str(exc)
+    else:
+        raise AssertionError("Expected plain RuntimeError to propagate")
 
 
 def test_oci_cli_create_data_safe_target_is_idempotent_by_name(tmp_path) -> None:

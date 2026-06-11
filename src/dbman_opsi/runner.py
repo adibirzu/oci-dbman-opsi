@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -15,6 +16,26 @@ from dbman_opsi.journal import RunJournal
 from dbman_opsi.redact import redact_text
 
 log = logging.getLogger(__name__)
+
+
+class OciError(RuntimeError):
+    """Base error for failed OCI CLI commands."""
+
+
+class OciAuthError(OciError):
+    """Authentication or authorization failure from OCI."""
+
+
+class OciNotFound(OciError):
+    """Requested OCI resource was not found."""
+
+
+class OciThrottled(OciError):
+    """OCI throttled the request."""
+
+
+class OciTransient(OciError):
+    """Likely transient OCI or network failure."""
 
 
 @dataclass(frozen=True)
@@ -76,9 +97,9 @@ class CommandRunner:
         # are surfaced to the user as text.
         if check and process.returncode != 0:
             safe_command = redact_text(" ".join(safe_args))
-            raise RuntimeError(
-                f"Command failed ({process.returncode}): {safe_command}\n{redact_text(process.stderr)}"
-            )
+            safe_stderr = redact_text(process.stderr)
+            message = f"Command failed ({process.returncode}): {safe_command}\n{safe_stderr}"
+            raise _classify_oci_error(safe_stderr, message)
         return CommandResult(safe_args, process.stdout, process.stderr, process.returncode)
 
     def _duration_ms(self, start: float) -> int:
@@ -103,3 +124,21 @@ class CommandRunner:
             duration_ms,
             redact_text(" ".join(args)),
         )
+
+
+def _classify_oci_error(stderr: str, message: str) -> OciError:
+    normalized = stderr.lower()
+    if any(marker in normalized for marker in ("notauthenticated", "forbidden", "not authorized", "notauthorized")):
+        return OciAuthError(message)
+    if "notfound" in normalized or "not found" in normalized or re.search(r"\b404\b", normalized):
+        return OciNotFound(message)
+    if "toomanyrequests" in normalized or "throttl" in normalized or re.search(r"\b429\b", normalized):
+        return OciThrottled(message)
+    if (
+        re.search(r"\b5\d{2}\b", normalized)
+        or "timeout" in normalized
+        or "timed out" in normalized
+        or "connection" in normalized
+    ):
+        return OciTransient(message)
+    return OciError(message)
