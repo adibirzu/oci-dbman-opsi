@@ -1,6 +1,6 @@
 import builtins
 
-from dbman_opsi.wizard import _plan_identity, _select, run_wizard
+from dbman_opsi.wizard import _plan_identity, _safe_discover, _select, run_wizard
 
 
 class FakeOci:
@@ -249,6 +249,34 @@ def test_select_accepts_accidentally_escaped_number(monkeypatch) -> None:
     )
 
     assert selected == {"id": "second", "display-name": "second"}
+
+
+def test_safe_discover_retries_once_before_fallback(capsys) -> None:
+    calls = 0
+
+    def flaky() -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary")
+        return [{"id": "ok"}]
+
+    assert _safe_discover("targets", flaky) == [{"id": "ok"}]
+    assert calls == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_safe_discover_prints_after_retries_exhausted(capsys) -> None:
+    calls = 0
+
+    def broken() -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("still down")
+
+    assert _safe_discover("targets", broken) == []
+    assert calls == 2
+    assert "Could not discover targets: still down" in capsys.readouterr().out
 
 
 class SplitCompartmentOci(FakeOci):

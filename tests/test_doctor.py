@@ -1,6 +1,7 @@
+import sys
 import subprocess
 
-from dbman_opsi.doctor import DoctorCheck, check_session, summarize_checks
+from dbman_opsi.doctor import DoctorCheck, check_environment, check_session, summarize_checks
 
 
 def test_summarize_checks_reports_ready_when_required_tools_exist() -> None:
@@ -64,3 +65,36 @@ def test_check_session_missing_cli(monkeypatch) -> None:
 
     assert not check_session("cap").ok
 
+
+def test_check_environment_flags_old_oci_cli(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "version_info", (3, 11, 0))
+    monkeypatch.setattr("dbman_opsi.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, check=False, capture_output=True, text=True):
+        if command == ["oci", "--version"]:
+            return subprocess.CompletedProcess(command, 0, "3.36.0\n", "")
+        return subprocess.CompletedProcess(command, 0, "Terraform v1.8.0\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    oci_check = next(check for check in check_environment() if check.name == "oci")
+
+    assert not oci_check.ok
+    assert "3.36.0" in oci_check.detail
+
+
+def test_check_environment_accepts_new_oci_cli(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "version_info", (3, 11, 0))
+    monkeypatch.setattr("dbman_opsi.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, check=False, capture_output=True, text=True):
+        if command == ["oci", "--version"]:
+            return subprocess.CompletedProcess(command, 0, "3.37.0\n", "")
+        return subprocess.CompletedProcess(command, 0, "Terraform v1.8.0\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    oci_check = next(check for check in check_environment() if check.name == "oci")
+
+    assert oci_check.ok
+    assert oci_check.detail == "3.37.0"

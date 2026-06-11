@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from dbman_opsi.runner import CommandRunner
+from dbman_opsi.runner import CommandRunner, OciError
 
 
 class _OciBase:
@@ -41,7 +41,7 @@ class _OciBase:
         try:
             self.run(args)
             return True
-        except RuntimeError as exc:
+        except OciError as exc:
             message = str(exc)
             if any(marker in message for marker in tolerated):
                 return False

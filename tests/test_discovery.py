@@ -198,3 +198,51 @@ def test_discover_parallel_matches_serial_across_compartments() -> None:
     # Same results, same order — parallelism must not reorder or drop compartments.
     assert parallel.to_dict() == serial.to_dict()
     assert tuple(c.id for c in parallel.compartments) == ("cmpt-0", "cmpt-1", "cmpt-2", "cmpt-3")
+
+
+class _OrderedDataSafeOci:
+    def list_data_safe_targets(self, compartment_id):
+        return [
+            {"id": "dst-1", "database-details": None},
+            {"id": "dst-2", "database-details": None},
+            {"id": "dst-3", "database-details": None},
+        ]
+
+    def get_data_safe_target(self, target_database_id):
+        return {
+            "id": target_database_id,
+            "database-details": {"service-name": f"{target_database_id}.svc"},
+        }
+
+
+def test_data_safe_enrichment_parallel_matches_serial_order() -> None:
+    serial_service = DiscoveryService(_OrderedDataSafeOci(), max_workers=1)  # type: ignore[arg-type]
+    parallel_service = DiscoveryService(_OrderedDataSafeOci(), max_workers=4)  # type: ignore[arg-type]
+    serial = serial_service._data_safe_targets_enriched("c")
+    parallel = parallel_service._data_safe_targets_enriched("c")
+
+    assert parallel == serial
+    assert [target["id"] for target in parallel] == ["dst-1", "dst-2", "dst-3"]
+    assert [target["database-details"]["service-name"] for target in parallel] == [
+        "dst-1.svc",
+        "dst-2.svc",
+        "dst-3.svc",
+    ]
+
+
+def test_data_safe_gets_run_concurrently() -> None:
+    import threading
+
+    class ConcurrentDataSafeOci(_OrderedDataSafeOci):
+        def __init__(self) -> None:
+            self.barrier = threading.Barrier(3, timeout=0.5)
+
+        def get_data_safe_target(self, target_database_id):
+            self.barrier.wait()
+            return super().get_data_safe_target(target_database_id)
+
+    service = DiscoveryService(ConcurrentDataSafeOci(), max_workers=3)  # type: ignore[arg-type]
+    targets = service._data_safe_targets_enriched("c")
+
+    assert [target["id"] for target in targets] == ["dst-1", "dst-2", "dst-3"]
+    assert all(target.get("database-details") for target in targets)
