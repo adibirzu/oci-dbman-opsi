@@ -1,5 +1,5 @@
 from dbman_opsi.oci_cli import OciCli
-from dbman_opsi.runner import CommandResult
+from dbman_opsi.runner import CommandResult, OciError
 
 
 class FakeRunner:
@@ -23,6 +23,15 @@ def test_oci_cli_adds_profile_region_and_json_output() -> None:
     assert runner.commands[0][-2:] == ["--output", "json"]
 
 
+def test_oci_cli_reads_profile_tenancy_from_config(tmp_path, monkeypatch) -> None:
+    config = tmp_path / "oci-config"
+    config.write_text("[cap]\ntenancy = tenancy-id\n", encoding="utf-8")
+    monkeypatch.setenv("OCI_CONFIG_FILE", str(config))
+    oci = OciCli("cap", "eu-frankfurt-1", FakeRunner("{}"))  # type: ignore[arg-type]
+
+    assert oci.profile_tenancy() == "tenancy-id"
+
+
 def test_oci_cli_lists_known_resource_types() -> None:
     runner = FakeRunner('{"data": []}')
     oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
@@ -37,8 +46,20 @@ def test_oci_cli_lists_known_resource_types() -> None:
     assert oci.list_exadata_infrastructure("compartment-id") == []
     assert oci.list_management_agents("compartment-id") == []
     assert oci.list_vaults("compartment-id") == []
+    assert oci.list_secrets("compartment-id") == []
     assert oci.list_db_management_private_endpoints("compartment-id") == []
     assert oci.list_opsi_private_endpoints("compartment-id") == []
+
+
+def test_oci_cli_database_list_does_not_use_unsupported_all_flag() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_databases("compartment-id", "db-system-id") == []
+
+    command = runner.commands[0]
+    assert command[5:8] == ["db", "database", "list"]
+    assert "--all" not in command
 
 
 def test_oci_cli_extracts_nested_items_response() -> None:
@@ -60,6 +81,7 @@ def test_oci_cli_get_methods_unwrap_data() -> None:
     assert oci.get_db_management_private_endpoint("pe-id") == {"lifecycle-state": "ACTIVE"}
     assert oci.get_opsi_private_endpoint("pe-id") == {"lifecycle-state": "ACTIVE"}
     assert oci.get_secret("secret-id") == {"lifecycle-state": "ACTIVE"}
+    assert oci.get_group("group-id") == {"lifecycle-state": "ACTIVE"}
     assert oci.get_management_agent("agent-id") == {"lifecycle-state": "ACTIVE"}
 
 
@@ -69,8 +91,10 @@ def test_oci_cli_list_methods_use_expected_verbs() -> None:
 
     assert oci.list_service_gateways("compartment-id", "vcn-id") == []
     assert oci.list_policies("compartment-id") == []
+    assert oci.list_secrets("compartment-id") == []
     assert runner.commands[0][5:8] == ["network", "service-gateway", "list"]
     assert runner.commands[1][5:8] == ["iam", "policy", "list"]
+    assert runner.commands[2][5:8] == ["vault", "secret", "list"]
 
 
 class _StateRunner:
@@ -138,3 +162,93 @@ def test_list_opsi_insights_complete_flag_true_when_all_states_answer() -> None:
 
     assert [i["id"] for i in insights] == ["ins-1"]
     assert complete is True
+
+
+def test_oci_cli_data_safe_list_and_get_command_shapes() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_data_safe_targets("compartment-id") == []
+    assert oci.list_data_safe_private_endpoints("compartment-id") == []
+
+    runner_get = FakeRunner('{"data": {"id": "dst-1"}}')
+    oci_get = OciCli("cap", "eu-frankfurt-1", runner_get)  # type: ignore[arg-type]
+    assert oci_get.get_data_safe_target("dst-1") == {"id": "dst-1"}
+    cmd = runner_get.commands[0]
+    assert cmd[5:9] == ["data-safe", "target-database", "get", "--target-database-id"]
+
+
+class _FailingRunner:
+    def __init__(self, error: RuntimeError):
+        self.error = error
+
+    def run(self, args, cwd=None, check=True):
+        raise self.error
+
+
+def test_run_tolerating_handles_typed_oci_error() -> None:
+    oci = OciCli(
+        "cap",
+        "eu-frankfurt-1",
+        _FailingRunner(OciError("already enabled")),
+    )  # type: ignore[arg-type]
+
+    assert oci.run_tolerating(["db", "enable"], tolerated=("already enabled",)) is False
+
+
+def test_run_tolerating_does_not_swallow_plain_runtime_error() -> None:
+    oci = OciCli(
+        "cap",
+        "eu-frankfurt-1",
+        _FailingRunner(RuntimeError("already enabled")),
+    )  # type: ignore[arg-type]
+
+    try:
+        oci.run_tolerating(["db", "enable"], tolerated=("already enabled",))
+    except RuntimeError as exc:
+        assert "already enabled" in str(exc)
+    else:
+        raise AssertionError("Expected plain RuntimeError to propagate")
+
+
+def test_oci_cli_create_data_safe_target_is_idempotent_by_name(tmp_path) -> None:
+    runner = FakeRunner('{"data": [{"id": "existing", "display-name": "dbmopsi"}]}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    details = tmp_path / "d.json"
+    details.write_text("{}")
+
+    # An existing target with the same display name short-circuits creation.
+    target_id = oci.create_data_safe_target("compartment-id", "dbmopsi", str(details))
+    assert target_id == "existing"
+    # Only the list call happened, no create.
+    assert all("create" not in cmd for cmd in runner.commands)
+
+
+def test_oci_cli_create_data_safe_target_builds_create_command(tmp_path) -> None:
+    runner = FakeRunner('{"data": {"id": "new-target"}}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    details = tmp_path / "d.json"
+    conn = tmp_path / "c.json"
+    creds = tmp_path / "cr.json"
+    for f in (details, conn, creds):
+        f.write_text("{}")
+
+    target_id = oci.create_data_safe_target(
+        "compartment-id", "newdb", str(details), str(conn), str(creds)
+    )
+    assert target_id == "new-target"
+    create_cmd = runner.commands[-1]
+    assert create_cmd[5:8] == ["data-safe", "target-database", "create"]
+    assert f"file://{details}" in create_cmd
+    assert f"file://{conn}" in create_cmd
+    assert f"file://{creds}" in create_cmd
+
+
+def test_oci_cli_create_data_safe_private_endpoint_idempotent() -> None:
+    runner = FakeRunner('{"data": [{"id": "pe-existing", "display-name": "dbmopsi-datasafe-pe"}]}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    pe = oci.create_data_safe_private_endpoint(
+        "compartment-id", "dbmopsi-datasafe-pe", "vcn-1", "subnet-1"
+    )
+    assert pe == "pe-existing"
+    assert all("create" not in cmd for cmd in runner.commands)

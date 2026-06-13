@@ -83,3 +83,7 @@ def print_configure_report(report: ConfigureReport) -> None:
         print("\nHandoff packets:")
         for path in report.handoff_paths:
             print(f"  {path}")
+    if report.data_safe:
+        print("\nData Safe (security pillar):")
+        for decision in report.data_safe:
+            print(f"  [{decision.status.upper()}] {decision.target}: {decision.detail}")

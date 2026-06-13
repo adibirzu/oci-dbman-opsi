@@ -168,9 +168,12 @@ list` flaps (0/2/7 items call-to-call), worsened by the 5-`--lifecycle-state` +
 - New `OciCli.get_opsi_database_insight(insight_id)`; `validate` prefers this
   **reliable GET by insight OCID** (`target.opsi_database_insight_id`, now persisted
   in config), falling back to the list only to discover an unknown OCID.
-- List-fallback verdict model never emits a false `NOT_FOUND`: positive hit is
-  authoritative (then GET); `NOT_FOUND` only on a stable non-empty list reproducibly
-  missing the target; empty/varying → `UNKNOWN`.
+- List-fallback verdict model never emits a false `NOT_FOUND`: it uses
+  `OciCli.list_opsi_database_insights_complete()` (per-state union + a
+  `complete` flag) and a **clean-window** rule — `NOT_FOUND` only when every
+  attempt answered, the read was complete and non-empty, and the id-set was
+  stable and reproducibly missing the target; a positive hit is authoritative
+  (then GET); empty/varying/incomplete → `UNKNOWN`.
 - (`src/dbman_opsi/oci_cli.py`, `src/dbman_opsi/validation.py`; tests in
   `tests/test_oci_cli.py`, `tests/test_validation.py`.) After the fix `validate`
   reports `ACTIVE (ENABLED)` for both targets deterministically. Full KB entry:
@@ -222,6 +225,70 @@ exec dbms_workload_repository.create_snapshot;                  -- seed
 `05-enable-performance-hub.sql` (autoflush + PDB snapshot interval + seed) and adds
 the STS grants to `03-grant-advanced-diagnostics.sql`. See `KB.md` 2026-06-07.
 
+## Defect 9 — OCID redaction in the data path broke OCID-keyed joins (code fix)
+
+Adding three-pillar discovery exposed that `CommandRunner.run()` redacted command
+**stdout before `.json()` parsed it**, collapsing every OCID to `<OCI_OCID>`. Any
+logic that joins resources by OCID (Data Safe / OPSI detection, named-credential
+id lookup, `validate`'s insight id-set) matched everything-to-everything — live
+`discover` falsely reported Data Safe `ENABLED` for *every* database. Fix: the
+runner returns **raw** stdout for `.json()`; redaction moved to the display
+boundary (`--json` wraps `redact_data`, errors/dry-run echo stay redacted). Human
+`discover` output intentionally keeps real OCIDs (operator copies them to config).
+Matcher also reads `associated-resource-ids` (the Data Safe LIST summary has
+`database-details: null`) and never treats a target's own id as a DB reference.
+(`runner.py`, `cli.py`, `status.py`; `KB.md` 2026-06-07.)
+
+## Defect 10 — zero-start-poc Terraform could plan but not apply a DBCS (code fix)
+
+Provisioning a new cap DBCS hit four apply-time failures, all now fixed in
+`terraform/examples/zero-start-poc`: (1) provider used default auth → AD data
+source null (`Attempt to index null value`) — added `config_file_profile`;
+(2) `400-LimitExceeded vm-block-storage-gb` — a **per-AD Database** limit (AD-1
+was 1024/1050; AD-2/AD-3 empty) — added `availability_domain_index`;
+(3) `domain name cannot be null` (subnet has no DNS label) — added
+`domain = var.dbcs_domain`; (4) Flex shape needs `cpu_core_count` +
+`data_storage_size_in_gb`. Secrets go in a gitignored `secrets.auto.tfvars.json`.
+See `KB.md` 2026-06-07.
+
+## Defect 11 — Data Safe target NEEDS_ATTENTION (ORA-01017) + DBSNMP rotation
+
+Registering DBMOPSI/PDB1 as a Data Safe target left it `NEEDS_ATTENTION` with
+`ORA-01017` — the DS private endpoint reached the listener, but the DBSNMP
+password was stale and could not be reset to it (CDB verify function needs **2+
+special chars**, `ORA-20000`). DBSNMP is a **common user**, so the password is set
+from the root with `CONTAINER=ALL` (`ORA-65066` if attempted inside a PDB). Fix
+(single-account POC): rotate DBSNMP to a policy-compliant password and keep the
+stack consistent — update the **one Vault secret** (DBM + OPSI both read it via
+`passwordSecretId`) and the Data Safe target creds
+(`data-safe target-database update --credentials file://... --force`). DBM stayed
+`UP`, OPSI `ENABLED`, Data Safe target reached `ACTIVE`. Also: `data-safe
+private-endpoint create` / `target-database update` return work requests
+(`--wait-for-state SUCCEEDED`, not `ACTIVE`). See `KB.md` 2026-06-07.
+
+## Defect 12 — OPSI create crashed on the post-enable propagation race (code fix)
+
+Enabling a freshly-provisioned DBCS: right after DBM enable, the managed database
+is not yet visible to Ops Insights, so `create-pe-comanaged` returns
+`400-MissingParameter "Provided database resource details were missing"` and the
+unhandled error crashed the whole orchestrated `configure` run before the PDB was
+processed. `EnablementService` now **retries** the OPSI create on the propagation
+markers (bounded `opsi_create_attempts`/`opsi_create_delay`, injectable sleeper)
+and only re-raises after exhausting them. (`enablement.py`; tests in
+`tests/test_enablement.py`.)
+
+## Phase 6 — Data Safe + a second, freshly-provisioned DBCS (3-pillar end-to-end)
+
+- **Existing DB:** created a Data Safe private endpoint in the DB subnet, applied
+  the Data Safe service-account grants (`audit_viewer`/`audit_admin`) via Bastion,
+  rotated DBSNMP, and registered PDB1 → Data Safe target **ACTIVE** alongside the
+  existing DBM `UP` + OPSI `ENABLED`.
+- **New DBCS (`dbman-opsi-dbcs2`, AD-2):** provisioned via the fixed Terraform,
+  set DBSNMP + grants via Bastion, then enabled all three pillars with
+  `configure --apply` (DBM+OPSI, CDB→PDB) and `data-safe --apply`. Final
+  discovery: CDB `dbmanops` `dbm=ENABLED, opsi=ENABLED, ds=ENABLED`; both Data
+  Safe targets **ACTIVE**.
+
 ## Final verified state (API)
 
 - DBM: CDB `DBMOPSI` **UP**, PDB `PDB1` **UP** (ADVANCED).
@@ -259,8 +326,31 @@ Committed (redacted) screenshots in `docs/screenshots/`:
   all-green.
 - `console-03-dbmopsi-pdbs.png` — PDBs tab: PDB1 **Up** with live Performance Hub
   metrics; full Performance/Tuning nav.
+- `console-04-data-safe-targets.png` — Data Safe **Target databases**: the three
+  registered targets (`dbman-opsi-dbcs-PDB1`, `dbman-opsi-dbcs2-cdb`,
+  `dbman-opsi-dbcs2-PDB1`) all **Active**.
+- `console-05-performance-hub.png` — Performance Hub: Activity Summary / Average
+  Active Sessions + ASH Analytics (SQL-detail tables blurred — live SQL/service/users).
+- `console-06-data-safe-assessment.png` — Data Safe **Security Assessment**: Risk
+  level + Risks by category + Top-5 security controls (aggregate charts only).
+
+The Managed Databases (`console-01`) and fleet (`console-02`) views now show **both**
+DB systems — the original `DBMOPSI`/`PDB1` and the freshly-provisioned
+`dbmanops`/`dbmanops_pdb1` — all Enabled/Full.
 
 Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/account
 name and emails; for operator-pasted images, sensitive bands (header
 region/account/avatar, compartment chip) are Gaussian-blurred with PIL. Raw captures
 go to `docs/screenshots/raw/` (gitignored) — only redacted images are committed.
+
+### Capturing more Console views (CDP-attach recipe)
+
+The Data Safe and Performance Hub views (`console-04`/`05`) were captured with the
+CDP-attach flow above and are committed. The OCI Console is a JET SPA whose left-nav
+and list rows live in **shadow DOM**, so Playwright/JS clicks do not reach them —
+the reliable recipe is: **you** navigate the menu in the logged-in CDP Chrome, then a
+small `connect_over_cdp` helper screenshots the current tab to
+`docs/screenshots/raw/`, and a PIL pass blurs the region/account band, compartment
+chip, and any SQL/service/user tables before committing. To add a **Security
+Assessment** view, open Data Safe → a target → Security Assessment and capture it the
+same way.

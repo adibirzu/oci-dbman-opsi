@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 from dbman_opsi.config import EnablementConfig, Target
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.status import dbm_status
+
+log = logging.getLogger(__name__)
 
 CLOUD_REQUIRED_FIELDS = ("resource_id", "password_secret_id", "private_endpoint_id", "service_name", "monitoring_user")
 
@@ -96,9 +102,34 @@ def cloud_modify_command(target: Target) -> list[str]:
     ]
 
 
+# Markers that mean Ops Insights does not yet see the database after Database
+# Management was just enabled — a propagation race, not a permanent error. The
+# managed database takes a short while to register before OPSI can attach.
+OPSI_PROPAGATION_MARKERS = (
+    "Provided database resource",
+    "details were missing",
+    "MissingParameter",
+)
+
+
 class EnablementService:
-    def __init__(self, oci: OciCli) -> None:
+    def __init__(
+        self,
+        oci: OciCli,
+        *,
+        opsi_create_attempts: int = 5,
+        opsi_create_delay: float = 30.0,
+        sleeper=time.sleep,
+    ) -> None:
         self.oci = oci
+        self.opsi_create_attempts = opsi_create_attempts
+        self.opsi_create_delay = opsi_create_delay
+        self._sleep = sleeper
+        # Bounded wait for DBM to finish ENABLING before attempting OPSI, so the
+        # managed database is registered and Ops Insights can attach on the first
+        # try (the OPSI create retry above remains as a backstop).
+        self.dbm_wait_attempts = 20
+        self.dbm_wait_delay = 15.0
 
     def enable_all(self, config: EnablementConfig, force_reconcile: bool = False) -> None:
         for target in config.targets:
@@ -159,11 +190,46 @@ class EnablementService:
             # per target, so skip it when monitoring is already healthy — only
             # reconcile to repair a broken connection (or when forced).
             if not force_reconcile and self._dbm_monitoring_healthy(target):
-                print(f"Database Management already enabled and monitoring healthy for {target.name}; skipping reconcile")
+                log.info(
+                    "Database Management already enabled and monitoring healthy for %s; skipping reconcile",
+                    target.name,
+                )
             else:
-                print(f"Database Management already enabled for {target.name}; reconciling connection")
+                log.info("Database Management already enabled for %s; reconciling connection", target.name)
                 self.oci.run(cloud_modify_command(target))
+        elif applied:
+            # Freshly enabled: wait until DBM reports ENABLED (managed database
+            # registered) before attaching Ops Insights, to avoid the propagation
+            # race ("Provided database resource details were missing").
+            self._wait_dbm_enabled(target)
         self._enable_opsi_pe_comanaged_if_ready(target)
+
+    def _wait_dbm_enabled(self, target: Target) -> None:
+        """Poll until the target's Database Management status is ENABLED.
+
+        Best-effort: an unreadable status (no getter / transient error) returns
+        immediately and lets the OPSI create retry handle any remaining race.
+        """
+
+        if not target.resource_id:
+            return
+        for attempt in range(self.dbm_wait_attempts):
+            try:
+                if target.database_role == "PDB":
+                    details = self.oci.get_pluggable_database(target.resource_id)
+                else:
+                    details = self.oci.get_database(target.resource_id)
+            except (RuntimeError, AttributeError):
+                return
+            status = str(dbm_status(details, target.kind, target.database_role) or "").upper()
+            # Done once strictly ENABLED (the managed database is registered).
+            # Only keep waiting while it is actively ENABLING; any other/unknown
+            # status returns immediately (best-effort — the OPSI create retry is
+            # the backstop, and this avoids busy-waiting on a non-progressing read).
+            if status != "ENABLING":
+                return
+            if attempt < self.dbm_wait_attempts - 1:
+                self._sleep(self.dbm_wait_delay)
 
     def _dbm_monitoring_healthy(self, target: Target) -> bool:
         """True when the managed database reports an UP monitoring status.
@@ -191,12 +257,12 @@ class EnablementService:
             if not value
         ]
         if shared_missing:
-            print(f"Skipping Ops Insights for {target.name}; missing: {', '.join(shared_missing)}")
+            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(shared_missing))
             return
         if self._opsi_insight_active(target):
             # Idempotent: an ACTIVE insight already collects, so do not re-create
             # (create-pe-comanaged on an existing insight conflicts / hangs).
-            print(f"Ops Insights insight already ACTIVE for {target.name}; skipping create")
+            log.info("Ops Insights insight already ACTIVE for %s; skipping create", target.name)
             return
         if not target.opsi_database_insight_id:
             self._create_opsi_pe_comanaged(target)
@@ -271,7 +337,7 @@ class EnablementService:
             if not value
         ]
         if missing:
-            print(f"Skipping Ops Insights for {target.name}; missing: {', '.join(missing)}")
+            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(missing))
             return
         args = [
             "opsi",
@@ -301,10 +367,28 @@ class EnablementService:
         if target.opsi_connection_details_file:
             args.extend(["--connection-details", f"file://{target.opsi_connection_details_file}"])
         # Tolerate a 409 "already exists" so a flaky active-check that fell through
-        # does not fail the run when the insight is in fact present.
-        created = self.oci.run_tolerating(args, tolerated=("already exists",))
-        if not created:
-            print(f"Ops Insights insight already exists for {target.name}; left as-is")
+        # does not fail the run when the insight is in fact present. Retry on the
+        # post-enable propagation race ("database resource details were missing"):
+        # right after DBM is enabled, the managed database is not yet visible to
+        # Ops Insights, so the create is rejected until registration completes.
+        for attempt in range(self.opsi_create_attempts):
+            try:
+                created = self.oci.run_tolerating(args, tolerated=("already exists",))
+                if not created:
+                    log.info("Ops Insights insight already exists for %s; left as-is", target.name)
+                return
+            except RuntimeError as exc:
+                is_propagation = any(marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS)
+                if is_propagation and attempt < self.opsi_create_attempts - 1:
+                    log.info(
+                        "Ops Insights not ready for %s (database registering); retry %s/%s",
+                        target.name,
+                        attempt + 1,
+                        self.opsi_create_attempts - 1,
+                    )
+                    self._sleep(self.opsi_create_delay)
+                    continue
+                raise
 
     def _print_external_next_step(self, target: Target) -> None:
-        print(f"External target {target.name}: run generated Management Agent script, then rerun validate.")
+        log.info("External target %s: run generated Management Agent script, then rerun validate.", target.name)

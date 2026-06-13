@@ -28,6 +28,45 @@ def _enable_command_text(target: Target, config: EnablementConfig) -> str:
     return command
 
 
+def _db_side_steps(target: Target) -> str:
+    steps = [
+        "@01-create-monitoring-user.sql",
+        "@02-grant-basic-monitoring.sql",
+        "-- optional, review licensing/security first:",
+        "@03-grant-advanced-diagnostics.sql",
+        "-- optional, enables PDB-level ADDM Spotlight / AWR Explorer data:",
+        "@05-enable-performance-hub.sql",
+        "@04-validate-monitoring-user.sql",
+    ]
+    if target.wants("datasafe"):
+        steps.append("-- Data Safe service account + baseline assessment/audit privileges:")
+        steps.append("@06-enable-data-safe.sql")
+    return "\n".join(steps)
+
+
+def _data_safe_context(target: Target) -> str:
+    if not target.wants("datasafe"):
+        return ""
+    return f"""
+## 4. Data Safe (security pillar)
+
+| Field | Value |
+| --- | --- |
+| Data Safe service account | {target.monitoring_user or 'DBSNMP'} |
+| Data Safe target OCID | {target.data_safe_target_id or '<run data-safe enable>'} |
+| Data Safe private endpoint OCID | {target.data_safe_private_endpoint_id or '<run prepare-prereqs>'} |
+
+After `06-enable-data-safe.sql` runs, register the database as a Data Safe target:
+
+```bash
+dbman-opsi data-safe --config <config> --apply
+```
+
+For Data Masking / Data Discovery, also download and run the per-target privilege
+script from the OCI Console (Data Safe > Target databases > Register).
+"""
+
+
 def handoff_text(target: Target, config: EnablementConfig) -> str:
     is_external = target.kind in {"external-db", "external-exadata"}
     oci_step = (
@@ -43,6 +82,7 @@ Target kind: {target.kind}
 Region: {config.region}
 Service name: {target.service_name or '<set service_name>'}
 Monitoring user: {target.monitoring_user or 'DBSNMP'}
+Pillars: {', '.join(target.services)}
 
 ## 1. Database-side steps (run as the DBA / SYSDBA)
 
@@ -50,11 +90,7 @@ Execute these scripts in order with SQLcl or SQL*Plus. They prompt for the
 monitoring password interactively and never store it in a file:
 
 ```sql
-@01-create-monitoring-user.sql
-@02-grant-basic-monitoring.sql
--- optional, review licensing/security first:
-@03-grant-advanced-diagnostics.sql
-@04-validate-monitoring-user.sql
+{_db_side_steps(target)}
 ```
 
 `04-validate-monitoring-user.sql` must show the monitoring user with
@@ -73,7 +109,7 @@ monitoring password interactively and never store it in a file:
 {oci_step}
 
 Then confirm with `dbman-opsi validate --config <config>`.
-"""
+{_data_safe_context(target)}"""
 
 
 def generate_handoff(config: EnablementConfig, output_dir: str | Path) -> list[Path]:

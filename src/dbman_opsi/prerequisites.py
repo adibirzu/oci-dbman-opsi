@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 
 from dbman_opsi.config import EnablementConfig
 from dbman_opsi.oci_cli import OciCli
+
+log = logging.getLogger(__name__)
 
 # A list-first idempotency check can miss an existing resource when the OCI
 # control plane returns a flaky empty/partial list (the same non-determinism that
@@ -34,23 +37,26 @@ class PrerequisiteService:
         """
 
         if not self.oci.run_tolerating(args, tolerated=_CREATE_CONFLICT_MARKERS):
-            print(f"{what} already exists (create returned a name conflict); treated as a no-op.")
+            log.info("%s already exists (create returned a name conflict); treated as a no-op.", what)
 
     def prepare(self, config: EnablementConfig, password_env: str | None = None) -> None:
         if config.network.subnet_id:
             self._create_db_management_private_endpoint(config)
             self._create_opsi_private_endpoint(config)
         else:
-            print("Skipping private endpoints; config.network.subnet_id is missing.")
+            log.info("Skipping private endpoints; config.network.subnet_id is missing.")
         if config.vault.create_vault and not config.vault.vault_id:
-            print("Vault creation is supported by OCI CLI, but config must be refreshed with the created vault endpoint before key creation.")
+            log.info(
+                "Vault creation is supported by OCI CLI, but config must be refreshed "
+                "with the created vault endpoint before key creation."
+            )
         if password_env:
             self._create_password_secrets(config, password_env)
 
     def _create_db_management_private_endpoint(self, config: EnablementConfig) -> None:
         existing = self.oci.list_db_management_private_endpoints(config.compartment_id or "")
         if any(item.get("name") == "dbman_opsi_dbmgmt_pe" for item in existing):
-            print("Database Management private endpoint dbman_opsi_dbmgmt_pe already exists; skipping create.")
+            log.info("Database Management private endpoint dbman_opsi_dbmgmt_pe already exists; skipping create.")
             return
         self._create_tolerant([
             "database-management",
@@ -73,7 +79,7 @@ class PrerequisiteService:
     def _create_opsi_private_endpoint(self, config: EnablementConfig) -> None:
         existing = self.oci.list_opsi_private_endpoints(config.compartment_id or "")
         if any(item.get("display-name") == "dbman_opsi_opsi_pe" for item in existing):
-            print("Ops Insights private endpoint dbman_opsi_opsi_pe already exists; skipping create.")
+            log.info("Ops Insights private endpoint dbman_opsi_opsi_pe already exists; skipping create.")
             return
         self._create_tolerant([
             "opsi",
@@ -95,11 +101,11 @@ class PrerequisiteService:
 
     def _create_password_secrets(self, config: EnablementConfig, password_env: str) -> None:
         if not config.vault.vault_id or not config.vault.key_id:
-            print("Skipping password secret creation; vault_id and key_id are required.")
+            log.info("Skipping password secret creation; vault_id and key_id are required.")
             return
         password = os.environ.get(password_env)
         if not password:
-            print(f"Skipping password secret creation; environment variable {password_env} is not set.")
+            log.info("Skipping password secret creation; environment variable %s is not set.", password_env)
             return
         encoded = base64.b64encode(password.encode("utf-8")).decode("ascii")
         for target in config.targets:

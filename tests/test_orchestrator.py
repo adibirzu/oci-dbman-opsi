@@ -169,3 +169,42 @@ def test_report_to_dict_round_trips() -> None:
     assert data["ok"] is True
     assert data["decisions"][0]["action"] == "ready"
     assert "preflight" in data
+
+
+def test_configure_apply_runs_data_safe_for_opted_in_targets() -> None:
+    from dbman_opsi.datasafe import DataSafeDecision
+
+    class FakeDataSafe:
+        def __init__(self):
+            self.called_with = None
+
+        def enable_all(self, config):
+            self.called_with = config
+            return [DataSafeDecision("cloud db", "enabled", "Data Safe target registered", "dst-1")]
+
+    write = RecordingEnableOci()
+    ds = FakeDataSafe()
+    service = ConfigureService(FakeOci(), EnablementService(write), datasafe=ds)  # type: ignore[arg-type]
+    report = service.configure(_native_config(), mode="apply")
+
+    assert ds.called_with is not None  # Data Safe ran in apply mode
+    assert len(report.data_safe) == 1
+    assert report.data_safe[0].status == "enabled"
+    assert "data_safe" in report.to_dict()
+
+
+def test_configure_plan_mode_does_not_run_data_safe() -> None:
+    class FakeDataSafe:
+        def __init__(self):
+            self.called = False
+
+        def enable_all(self, config):
+            self.called = True
+            return []
+
+    ds = FakeDataSafe()
+    service = ConfigureService(FakeOci(), EnablementService(RecordingEnableOci()), datasafe=ds)  # type: ignore[arg-type]
+    report = service.configure(_native_config(), mode="plan")
+
+    assert ds.called is False
+    assert report.data_safe == ()

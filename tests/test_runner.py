@@ -1,14 +1,27 @@
-from dbman_opsi.runner import CommandRunner
+import logging
+
+import pytest
+
+from dbman_opsi.runner import (
+    CommandRunner,
+    OciAuthError,
+    OciError,
+    OciNotFound,
+    OciThrottled,
+    OciTransient,
+)
 
 
-def test_dry_run_runner_prints_redacted_command(capsys) -> None:
+def test_dry_run_runner_logs_redacted_command(caplog) -> None:
     runner = CommandRunner(dry_run=True)
+    caplog.set_level(logging.INFO, logger="dbman_opsi.runner")
 
     result = runner.run(["oci", "db", "get", "--database-id", "ocid1" + ".database.oc1..example"])
 
     assert result.returncode == 0
     assert result.json() == {}
-    assert "ocid1" + "." not in capsys.readouterr().out
+    assert "ocid1" + "." not in caplog.text
+    assert "+ oci db get" in caplog.text
 
 
 def test_runner_raises_on_failed_command() -> None:
@@ -22,6 +35,18 @@ def test_runner_raises_on_failed_command() -> None:
         raise AssertionError("Expected RuntimeError")
 
 
+def test_runner_returns_raw_ocids_for_logic() -> None:
+    # The data path must NOT redact OCIDs: discovery/credential joins parse real
+    # OCIDs out of command output. Redacting here would collapse every OCID to the
+    # same token and make OCID-keyed joins match everything-to-everything.
+    runner = CommandRunner(dry_run=False)
+    ocid = "ocid1" + ".database.oc1..realexample"
+
+    result = runner.run(["python3", "-c", f"print('{{\"data\": {{\"id\": \"{ocid}\"}}}}')"])
+
+    assert result.json()["data"]["id"] == ocid
+
+
 def test_runner_redacts_failed_command() -> None:
     runner = CommandRunner(dry_run=False)
 
@@ -31,3 +56,24 @@ def test_runner_redacts_failed_command() -> None:
         assert "ocid1" + "." not in str(exc)
     else:
         raise AssertionError("Expected RuntimeError")
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error_type"),
+    [
+        ("ServiceError: NotAuthenticated: session expired", OciAuthError),
+        ("ServiceError: Forbidden: missing policy", OciAuthError),
+        ("ServiceError: NotFound: target database not found", OciNotFound),
+        ("ServiceError: 404: target not found", OciNotFound),
+        ("ServiceError: TooManyRequests: retry later", OciThrottled),
+        ("ServiceError: 429: request throttled", OciThrottled),
+        ("ServiceError: 503 Service Unavailable", OciTransient),
+        ("connection timeout while calling OCI", OciTransient),
+        ("ServiceError: Unknown failure", OciError),
+    ],
+)
+def test_runner_classifies_oci_errors(stderr: str, error_type: type[OciError]) -> None:
+    runner = CommandRunner(dry_run=False)
+
+    with pytest.raises(error_type):
+        runner.run(["python3", "-c", f"import sys; sys.stderr.write({stderr!r}); sys.exit(7)"])

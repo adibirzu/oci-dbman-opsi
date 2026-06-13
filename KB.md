@@ -212,6 +212,87 @@ This KB captures implementation and live-tenancy troubleshooting notes for OCI D
   The CLI's read paths (`validate`, `preflight`, `configure` reads) correctly use
   `dry_run=False`.
 
+## 2026-06-07 Redaction in the data path broke OCID-keyed joins (Data Safe detection)
+
+- Symptom: live `discover` reported **Data Safe ENABLED for every database** in the
+  compartment, including databases with no registered Data Safe target. The same
+  matcher returned the correct NOT_ENABLED when called directly in a REPL with a
+  pasted real OCID.
+- Scope: any feature that joins two OCI resources by OCID parsed out of CLI output
+  — the new discovery pillar matching (OPSI insight / Data Safe target per DB),
+  `create_named_credential`/`set_preferred_named_credential` id linkage,
+  `find_managed_database_id`, and `validate`'s insight id-set comparison.
+- Root cause: `CommandRunner.run()` ran `redact_text()` over `process.stdout`
+  **before** `CommandResult.json()` parsed it, so every OCID became the literal
+  string `<OCI_OCID>`. With both sides of a join collapsed to the same token,
+  `wanted & candidate_ids` matched everything-to-everything. Redaction (a display
+  concern) was wrongly applied in the data path.
+- Fix:
+  - Runner returns RAW stdout/stderr for `.json()`. Only the dry-run command echo
+    and the `RuntimeError` message stay redacted (those are user-facing text).
+  - Redact at the display boundary instead: CLI `--json` output wraps `to_dict()`
+    in `redact_data()`. Human `discover` output already prints real OCIDs on
+    purpose (operators copy them into config; it is their own tenancy).
+  - Second bug in the same area: the Data Safe `target-database list` summary has
+    `database-details = null` and carries the registered DB OCID in
+    `associated-resource-ids`; the matcher now reads that and no longer treats a
+    target's own `id` as a DB reference.
+- Validation: live on cap — DBMOPSI/PDB1 correctly NOT_ENABLED for Data Safe; the
+  three registered ATP targets ENABLED; an unregistered ATP NOT_ENABLED.
+- Prevention: never redact in a value that downstream logic parses. Redact only at
+  print/serialize boundaries (`--json`, `sanitized()`, log lines, error strings).
+
+## 2026-06-07 Provisioning a new Base DB via zero-start-poc terraform (apply-time failures)
+
+The example planned cleanly but failed at apply with a sequence of issues; all are
+now fixed in `terraform/examples/zero-start-poc`:
+
+1. **`Attempt to index null value` on the AD data source.** The `provider "oci"`
+   block only set `region`, so it used default auth (wrong/empty tenancy) and
+   `oci_identity_availability_domains` returned null. Fix: add
+   `config_file_profile = var.config_file_profile` and pass the profile (e.g.
+   `cap`). Symptom is generic — any data source silently returns empty.
+2. **`vm-block-storage-gb` LimitExceeded.** This is a **Database** service limit
+   (not Block Volume), enforced **per availability domain** (1050 GB/AD here). The
+   existing DB system filled AD-1 (1024/1050); AD-2/AD-3 were empty. The terraform
+   hardcoded `ads[0]`. Fix: `availability_domain_index` var to pin a DB system to
+   an AD with headroom. Check with:
+   `oci limits resource-availability get --service-name database --limit-name vm-block-storage-gb --availability-domain <AD> --compartment-id <tenancy>`.
+3. **`domain name cannot be null` on LaunchDbSystem.** The subnet has no DNS label,
+   so the DB system can't derive its network domain and one must be passed
+   explicitly. Fix: `domain = var.dbcs_domain`; reuse the existing DB system's
+   domain (`oci db system get ... --query 'data.domain'`).
+4. **Flex shape needs explicit sizing.** `VM.Standard.E4.Flex` requires
+   `cpu_core_count`, and a VM DB system requires `data_storage_size_in_gb`
+   (min 256). Added both as vars.
+
+Secrets (`ssh_public_keys`, `db_admin_password`) go in a gitignored
+`secrets.auto.tfvars.json` (now `*.auto.tfvars*` and `*.tfvars` are gitignored),
+never in `render_tfvars` or committed files.
+
+## 2026-06-07 Data Safe target stuck NEEDS_ATTENTION (ORA-01017) + DBSNMP rotation
+
+- Symptom: `data-safe target-database` registers but stays NEEDS_ATTENTION with
+  `lifecycle-details = "Failed to connect to database. ORA-01017: invalid
+  username/password"`. The network path is fine (DS PE reached the listener) —
+  only the credential failed.
+- Root cause: the stored DBSNMP password was stale, and DBSNMP could not be reset
+  to it because the **CDB** password verify function requires **2+ special
+  characters** (`ORA-20000`). DBSNMP is a **common user**, so its password must be
+  changed from the root with `alter user DBSNMP identified by "..." container=ALL`
+  — an in-PDB `alter user` fails with `ORA-65066` ("must apply to all containers").
+- Fix (single-account POC): rotate DBSNMP to a policy-compliant password
+  CONTAINER=ALL via Bastion, then keep the stack consistent by updating BOTH the
+  Vault secret (DBM + OPSI both read it via `passwordSecretId`) and the Data Safe
+  target credentials (`data-safe target-database update --credentials file://... --force`).
+  DBM monitoring stayed `UP`, OPSI `ENABLED`, Data Safe target reached `ACTIVE`.
+- `data-safe private-endpoint create` and `target-database update` return WORK
+  REQUESTS: `--wait-for-state` takes `SUCCEEDED`, not `ACTIVE`. `update` also needs
+  `--force` to skip the confirmation prompt non-interactively.
+- Detection nuance: a DATABASE_CLOUD_SERVICE target registered with a PDB service
+  name associates (in `associated-resource-ids`) with the **DB system**, so
+  discovery attributes Data Safe to the CDB/DB-system level, not the individual PDB.
+
 ## Current Demo Validation Checklist
 
 - DB system lifecycle: AVAILABLE.
