@@ -1,7 +1,8 @@
 # dbman-opsi — Continuous Integration
 #
-# Three gating jobs:
+# Four gating jobs:
 #   test        — pytest across Python 3.11/3.12/3.13 with 80 % coverage gate
+#   deps        — pip-audit dependency vulnerability scan
 #   security    — bandit static-analysis (medium+ severity)
 #   secret-scan — gitleaks full-history + custom OCI OCID/token rules
 #
@@ -44,7 +45,31 @@ jobs:
         # no need to duplicate flags here.
         run: pytest
 
-  # ─── 2. Security scan ────────────────────────────────────────────────────────
+  # ─── 2. Dependency CVE scan ──────────────────────────────────────────────────
+  deps:
+    name: Dependency scan (pip-audit)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit .
+
+  # ─── 3. Security scan ────────────────────────────────────────────────────────
   security:
     name: Security scan (bandit)
     runs-on: ubuntu-latest
@@ -79,7 +104,7 @@ jobs:
         #   suppressed inline with `# nosec B108` and a justification.
         run: bandit -r src/ -ll --skip B608
 
-  # ─── 3. Secret scan ──────────────────────────────────────────────────────────
+  # ─── 4. Secret scan ──────────────────────────────────────────────────────────
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

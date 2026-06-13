@@ -118,6 +118,22 @@ def test_validate_config_reports_malformed_id_field() -> None:
     assert validate_config(config) == ["targets[0] adb: resource_id must look like an OCI OCID"]
 
 
+def test_validate_config_reports_overlong_ocid_field() -> None:
+    config = EnablementConfig(
+        profile="DEFAULT",
+        region="eu-frankfurt-1",
+        targets=(
+            Target(
+                kind="autonomous",
+                name="adb",
+                resource_id="ocid1" + ".database.oc1.." + ("a" * 300),
+            ),
+        ),
+    )
+
+    assert validate_config(config) == ["targets[0] adb: resource_id must look like an OCI OCID"]
+
+
 def test_load_config_reports_all_validation_problems(tmp_path: Path) -> None:
     path = tmp_path / "invalid.yaml"
     path.write_text(
