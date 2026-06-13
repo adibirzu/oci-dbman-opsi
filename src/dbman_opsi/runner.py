@@ -17,6 +17,8 @@ from dbman_opsi.redact import redact_text
 
 log = logging.getLogger(__name__)
 
+CommandExecutor = Callable[[tuple[str, ...], str | None], subprocess.CompletedProcess[str]]
+
 
 class OciError(RuntimeError):
     """Base error for failed OCI CLI commands."""
@@ -59,18 +61,34 @@ class CommandRunner:
         journal: RunJournal | None = None,
         run_id: str | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        sleeper: Callable[[float], None] = time.sleep,
+        max_attempts: int = 3,
+        base_delay: float = 0.25,
+        max_delay: float = 2.0,
+        executor: CommandExecutor | None = None,
         verbose: bool = False,
     ) -> None:
         self.dry_run = dry_run
         self.journal = journal
         self.run_id = run_id
         self._clock = clock
+        self._sleeper = sleeper
+        self.max_attempts = max(1, max_attempts)
+        self.base_delay = max(0.0, base_delay)
+        self.max_delay = max(0.0, max_delay)
+        self._executor = executor or _subprocess_executor
         self.verbose = verbose
 
-    def run(self, args: list[str], cwd: str | Path | None = None, check: bool = True) -> CommandResult:
+    def run(
+        self,
+        args: list[str],
+        cwd: str | Path | None = None,
+        check: bool = True,
+        retry_on_transient: bool = False,
+    ) -> CommandResult:
         safe_args = tuple(args)
-        start = self._clock()
         if self.dry_run:
+            start = self._clock()
             result = CommandResult(safe_args, "{}", "", 0)
             duration_ms = self._duration_ms(start)
             log.info(redact_text("+ " + " ".join(safe_args)))
@@ -78,13 +96,26 @@ class CommandRunner:
             self._log_timing(safe_args, result.returncode, duration_ms)
             return result
 
-        process = subprocess.run(
-            safe_args,
-            cwd=str(cwd) if cwd else None,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        attempts = self.max_attempts if check else 1
+        cwd_value = str(cwd) if cwd else None
+        for attempt in range(attempts):
+            try:
+                return self._run_once(safe_args, cwd_value, check)
+            except OciError as exc:
+                if not self._should_retry(exc, retry_on_transient, attempt, attempts):
+                    raise
+                self._sleeper(self._delay_for_attempt(attempt))
+        raise RuntimeError("unreachable retry state")
+
+    def _run_once(self, safe_args: tuple[str, ...], cwd: str | None, check: bool) -> CommandResult:
+        start = self._clock()
+        try:
+            process = self._executor(safe_args, cwd)
+        except OciError:
+            duration_ms = self._duration_ms(start)
+            self._record(safe_args, 1, duration_ms)
+            self._log_timing(safe_args, 1, duration_ms)
+            raise
         duration_ms = self._duration_ms(start)
         self._record(safe_args, process.returncode, duration_ms)
         self._log_timing(safe_args, process.returncode, duration_ms)
@@ -101,6 +132,24 @@ class CommandRunner:
             message = f"Command failed ({process.returncode}): {safe_command}\n{safe_stderr}"
             raise _classify_oci_error(safe_stderr, message)
         return CommandResult(safe_args, process.stdout, process.stderr, process.returncode)
+
+    def _should_retry(
+        self,
+        exc: OciError,
+        retry_on_transient: bool,
+        attempt: int,
+        attempts: int,
+    ) -> bool:
+        if attempt >= attempts - 1:
+            return False
+        if isinstance(exc, OciThrottled):
+            return True
+        if isinstance(exc, OciTransient):
+            return retry_on_transient
+        return False
+
+    def _delay_for_attempt(self, attempt: int) -> float:
+        return min(self.max_delay, self.base_delay * (2**attempt))
 
     def _duration_ms(self, start: float) -> int:
         return max(0, int(round((self._clock() - start) * 1000)))
@@ -142,3 +191,16 @@ def _classify_oci_error(stderr: str, message: str) -> OciError:
     ):
         return OciTransient(message)
     return OciError(message)
+
+
+def _subprocess_executor(
+    args: tuple[str, ...],
+    cwd: str | None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )

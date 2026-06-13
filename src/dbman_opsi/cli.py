@@ -33,7 +33,7 @@ from dbman_opsi.redact import redact_data
 from dbman_opsi.reporting import print_configure_report, print_inventory, print_preflight_report
 from dbman_opsi.runner import CommandRunner
 from dbman_opsi.terraform import run_terraform, write_tfvars
-from dbman_opsi.tf_outputs import merge_outputs_into_config, read_terraform_outputs
+from dbman_opsi.tf_outputs import merge_outputs_into_config, read_terraform_outputs, validate_merged_config
 from dbman_opsi.validation import ValidationService
 from dbman_opsi.wizard import run_wizard
 
@@ -366,6 +366,7 @@ def _cmd_import_tf_outputs(args: argparse.Namespace, ctx: _CliContext) -> int:
     if args.dry_run:
         print("Dry run: config not written.")
         return 0
+    validate_merged_config(merged)
     save_config(args.config, merged)
     print(f"Wrote merged config to {args.config}")
     return 0

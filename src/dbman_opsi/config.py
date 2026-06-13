@@ -21,6 +21,7 @@ DEFAULT_SERVICES: tuple[Service, ...] = ("dbm", "opsi")
 ALLOWED_TARGET_KINDS = frozenset(get_args(TargetKind))
 ALLOWED_SERVICES = frozenset(get_args(Service))
 OCID_PREFIX_RE = re.compile(r"^ocid1\.[a-z0-9]+\.oc[0-9]\.")
+MAX_OCID_LENGTH = 255
 
 
 class ConfigError(ValueError):
@@ -224,7 +225,11 @@ def _invalid_ocid_value(value: object) -> bool:
 
 
 def _looks_like_ocid(value: object) -> bool:
-    return isinstance(value, str) and OCID_PREFIX_RE.match(value) is not None
+    return (
+        isinstance(value, str)
+        and len(value) <= MAX_OCID_LENGTH
+        and OCID_PREFIX_RE.match(value) is not None
+    )
 
 
 def to_dict(config: EnablementConfig) -> dict[str, Any]:

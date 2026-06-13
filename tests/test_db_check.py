@@ -1,3 +1,5 @@
+import pytest
+
 from dbman_opsi.db_check import parse_validation_output
 
 PASSING_SPOOL = """
@@ -62,3 +64,8 @@ def test_expiry_date_header_is_not_mistaken_for_expired() -> None:
 
     assert result.account_open
     assert result.ok
+
+
+def test_garbage_spool_raises_clear_parse_error() -> None:
+    with pytest.raises(ValueError, match="SQL\\*Plus validation spool"):
+        parse_validation_output("not the validation query output")
