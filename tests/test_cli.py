@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -83,6 +84,71 @@ def test_cli_threads_single_run_id_into_journaled_runners(tmp_path: Path, monkey
     assert {entry["profile"] for entry in entries} == {"DEFAULT"}
     assert {entry["region"] for entry in entries} == {"eu-frankfurt-1"}
     assert all(entry["dry_run"] is True for entry in entries)
+
+
+def test_cli_journal_last_json_round_trips_summary(tmp_path: Path, monkeypatch, capsys) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    older = runs / "older.jsonl"
+    newer = runs / "newer.jsonl"
+    older.write_text(json.dumps({"returncode": 0, "duration_ms": 99}) + "\n", encoding="utf-8")
+    newer.write_text(
+        json.dumps({"argv_redacted": ["oci", "ok"], "returncode": 0, "duration_ms": 7}) + "\n"
+        + json.dumps({"argv_redacted": ["oci", "fail"], "returncode": 1, "duration_ms": 5}) + "\n",
+        encoding="utf-8",
+    )
+    # Explicit, distinct mtimes so `--last` is unambiguous. A double touch() can
+    # land in the same mtime tick on coarse-resolution filesystems (e.g. CI),
+    # making the "newest" pick a flaky tie.
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["journal", "--last", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "command_count": 2,
+        "total_duration_ms": 12,
+        "failures": [{"argv_redacted": ["oci", "fail"], "returncode": 1, "duration_ms": 5}],
+    }
+
+
+def test_cli_journal_by_run_id_human_summary_redacts_ocids(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    runs.joinpath("run-human.jsonl").write_text(
+        json.dumps(
+            {
+                "argv_redacted": ["oci", "db", "get", "--database-id", "<OCI_OCID>"],
+                "returncode": 3,
+                "duration_ms": 21,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["journal", "run-human"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Commands: 1" in output
+    assert "Total duration: 21 ms" in output
+    assert "Failing commands:" in output
+    assert "<OCI_OCID>" in output
+    assert "ocid1" + "." not in output
+
+
+def test_cli_journal_missing_run_id_errors_cleanly(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit, match="journal requires RUN_ID or --last"):
+        main(["journal"])
 
 
 def test_cli_verbose_surfaces_command_timing(tmp_path: Path, monkeypatch, capsys) -> None:

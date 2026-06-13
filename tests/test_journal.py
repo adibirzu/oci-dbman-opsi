@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 
-from dbman_opsi.journal import RunJournal
+import pytest
+
+from dbman_opsi.journal import RunJournal, summarize
 from dbman_opsi.runner import CommandRunner
 
 
@@ -119,3 +121,42 @@ def test_runner_journals_dry_run_commands(tmp_path: Path) -> None:
     assert entries[0]["dry_run"] is True
     assert entries[0]["duration_ms"] == 3
     assert "ocid1" + "." not in (tmp_path / "runs" / "run-dry.jsonl").read_text(encoding="utf-8")
+
+
+def test_run_journal_reads_jsonl_and_summarizes_failures(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    root.mkdir()
+    path = root / "run-read.jsonl"
+    first = {
+        "argv_redacted": ["oci", "db", "get"],
+        "returncode": 0,
+        "duration_ms": 12,
+    }
+    second = {
+        "argv_redacted": ["oci", "db", "bad"],
+        "returncode": 2,
+        "duration_ms": 8,
+    }
+    path.write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n",
+        encoding="utf-8",
+    )
+
+    entries = RunJournal.read("run-read", root=root)
+    summary = summarize(entries)
+
+    assert entries == [first, second]
+    assert summary == {
+        "command_count": 2,
+        "total_duration_ms": 20,
+        "failures": [second],
+    }
+
+
+def test_run_journal_rejects_pathlike_run_id(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    root.mkdir()
+    (tmp_path / "outside.jsonl").write_text('{"returncode": 0}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="plain run id"):
+        RunJournal.read("../outside", root=root)

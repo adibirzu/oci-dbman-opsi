@@ -23,7 +23,7 @@ from dbman_opsi.db_scripts import generate_db_scripts
 from dbman_opsi.discovery import DiscoveryService
 from dbman_opsi.doctor import check_environment, check_session, summarize_checks
 from dbman_opsi.enablement import EnablementService
-from dbman_opsi.journal import RunJournal
+from dbman_opsi.journal import RunJournal, summarize
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.opsi_payloads import generate_opsi_payloads
 from dbman_opsi.orchestrator import ConfigureReport, ConfigureService
@@ -158,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--profile", help="Also verify the OCI session is authenticated for this profile")
     doctor.add_argument("--region", help="Region to use for the session check")
 
+    journal = add_parser("journal", help="Inspect a run journal")
+    journal.add_argument("run_id", nargs="?", help="Run ID from runs/<RUN_ID>.jsonl")
+    journal.add_argument("--last", action="store_true", help="Inspect the newest runs/*.jsonl file")
+    journal.add_argument("--json", action="store_true", help="Emit the journal summary as JSON")
+
     db_exec = add_parser(
         "db-exec",
         help="Generate DB-side scripts and show the hybrid run plan (auto-run in non-prod, handoff in prod)",
@@ -281,6 +286,51 @@ def _cmd_doctor(args: argparse.Namespace, ctx: _CliContext) -> int:
         print(f"{check.name}: {status} ({check.detail})")
     print(summarize_checks(checks))
     return 0 if all(check.ok for check in checks) else 1
+
+
+def _latest_journal_run_id(root: Path) -> str:
+    matches = list(root.glob("*.jsonl"))
+    if not matches:
+        raise SystemExit("no run journals found in runs/")
+    # Secondary key (name) makes the pick deterministic when two journals share an
+    # mtime (coarse-resolution filesystems); otherwise max() returns an arbitrary
+    # one in glob order.
+    return max(matches, key=lambda path: (path.stat().st_mtime, path.name)).stem
+
+
+def _print_journal_summary(summary: dict[str, object]) -> None:
+    print(f"Commands: {summary['command_count']}")
+    print(f"Total duration: {summary['total_duration_ms']} ms")
+    failures = summary["failures"]
+    if not failures:
+        print("Failing commands: none")
+        return
+    print("Failing commands:")
+    for entry in failures:
+        if not isinstance(entry, dict):
+            continue
+        command = " ".join(str(part) for part in entry.get("argv_redacted") or [])
+        returncode = entry.get("returncode")
+        duration = entry.get("duration_ms")
+        print(f"- rc={returncode} duration_ms={duration} {command}".rstrip())
+
+
+def _cmd_journal(args: argparse.Namespace, ctx: _CliContext) -> int:
+    root = Path("runs")
+    run_id = _latest_journal_run_id(root) if args.last else args.run_id
+    if not run_id:
+        raise SystemExit("journal requires RUN_ID or --last")
+    try:
+        summary = redact_data(summarize(RunJournal.read(run_id, root=root)))
+    except FileNotFoundError as exc:
+        raise SystemExit(f"journal file not found: {root / f'{run_id}.jsonl'}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"invalid run id: {exc}") from exc
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        _print_journal_summary(summary)
+    return 0
 
 
 def _cmd_provision(args: argparse.Namespace, ctx: _CliContext) -> int:
@@ -490,6 +540,7 @@ def _cmd_data_safe(args: argparse.Namespace, ctx: _CliContext) -> int:
 def _command_handlers():
     return {
         "plan": _cmd_plan,
+        "journal": _cmd_journal,
         "doctor": _cmd_doctor,
         "provision": _cmd_provision,
         "enable": _cmd_enable,
