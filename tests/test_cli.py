@@ -2,9 +2,11 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
+
 from dbman_opsi.checks import PreflightReport, fail, ok
 from dbman_opsi.cli import main
-from dbman_opsi.config import EnablementConfig, NetworkSelection, Target, save_config
+from dbman_opsi.config import ConfigError, EnablementConfig, NetworkSelection, Target, save_config
 from dbman_opsi.orchestrator import ConfigureReport, TargetDecision
 
 
@@ -299,6 +301,31 @@ def test_cli_import_tf_outputs_dry_run_does_not_write(tmp_path: Path, monkeypatc
 
     assert main(["import-tf-outputs", "--config", str(config_path), "--dry-run"]) == 0
     assert "Dry run" in capsys.readouterr().out
+    assert load_config(config_path).network.subnet_id is None
+
+
+def test_cli_import_tf_outputs_rejects_invalid_merged_config(tmp_path: Path, monkeypatch) -> None:
+    from dbman_opsi.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            network=NetworkSelection(create_test_network=True),
+        ),
+    )
+    before = config_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        "dbman_opsi.cli.read_terraform_outputs",
+        lambda terraform_dir, runner: {"subnet_ocid": {"value": "not-an-ocid"}},
+    )
+
+    with pytest.raises(ConfigError, match="network.subnet_id"):
+        main(["import-tf-outputs", "--config", str(config_path)])
+
+    assert config_path.read_text(encoding="utf-8") == before
     assert load_config(config_path).network.subnet_id is None
 
 

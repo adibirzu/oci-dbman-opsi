@@ -6,9 +6,11 @@ class FakeRunner:
     def __init__(self, payload):
         self.payload = payload
         self.commands = []
+        self.retry_flags = []
 
-    def run(self, args, cwd=None, check=True):
+    def run(self, args, cwd=None, check=True, retry_on_transient=False):
         self.commands.append(args)
+        self.retry_flags.append(retry_on_transient)
         return CommandResult(tuple(args), self.payload, "", 0)
 
 
@@ -21,6 +23,7 @@ def test_oci_cli_adds_profile_region_and_json_output() -> None:
     assert vcns == [{"id": "vcn-id"}]
     assert runner.commands[0][:5] == ["oci", "--profile", "DEFAULT", "--region", "eu-frankfurt-1"]
     assert runner.commands[0][-2:] == ["--output", "json"]
+    assert runner.retry_flags == [True]
 
 
 def test_oci_cli_reads_profile_tenancy_from_config(tmp_path, monkeypatch) -> None:
@@ -110,7 +113,7 @@ class _StateRunner:
         self.fail_state = fail_state
         self.commands = []
 
-    def run(self, args, cwd=None, check=True):
+    def run(self, args, cwd=None, check=True, retry_on_transient=False):
         self.commands.append(args)
         state = args[args.index("--lifecycle-state") + 1]
         if state == self.fail_state:
@@ -182,7 +185,7 @@ class _FailingRunner:
     def __init__(self, error: RuntimeError):
         self.error = error
 
-    def run(self, args, cwd=None, check=True):
+    def run(self, args, cwd=None, check=True, retry_on_transient=False):
         raise self.error
 
 
