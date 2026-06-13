@@ -128,6 +128,14 @@ For your public fork, update the button URL to your repository archive URL.
 - `data-safe`: register databases as **Data Safe** target databases for targets that opt into the `datasafe` pillar. Creates a Data Safe private endpoint in the DB subnet if needed, prompts for the service-account credentials (DBSNMP default; `--password-env` for non-interactive), registers the target, and persists the target OCID back into the config. Dry-run by default; `--apply` performs live registration.
 - `db-exec`: regenerate the DB-side SQL scripts and show the **hybrid run plan** — auto-run via Bastion in non-production tenancies, generate-and-handoff in production (`emdemo`). `--force` treats the run as non-production. `--apply` (with `--bastion-id`/`--target-ip`/`--ssh-key`, and `--answers-file` for accept-prompt answers) auto-runs the scripts on the DB node through a Bastion port-forward session.
 - `validate`: check service state and collection readiness. Reports the real OPSI Database Insight lifecycle (`ACTIVE`/`FAILED`/`NOT_FOUND`/`UNKNOWN`) per target rather than a generic message — using a reliable GET-by-OCID and a verdict model that never emits a false `NOT_FOUND` from the flaky list.
+- `journal`: inspect a run's command ledger. Every invocation records one **redacted** JSON line per OCI/Terraform command to `runs/<run_id>.jsonl`; `dbman-opsi journal [RUN_ID] [--last] [--json]` reads it back as a summary (command count, total duration, failing commands). `--last` resolves the newest run.
+
+## Observability, resilience & safety
+
+- **Redacted run-journal** at the single command choke point (`runner.run`) — auditable history of every OCI/Terraform call, with OCIDs/secrets stripped (read it back with `journal`). A global `--verbose` surfaces per-call timing.
+- **Typed errors + retry/backoff** — failures are classified (`OciAuthError`/`OciNotFound`/`OciThrottled`/`OciTransient`); throttles always retry, transient errors retry for reads, auth/not-found never retry. Bounded exponential backoff.
+- **Boundary validation** — config is validated at load **and** after merging Terraform outputs; malformed kinds/services/OCIDs are rejected before any OCI call (`ConfigError`).
+- **Secrets never committed** — OCIDs/IPs/namespaces are redacted at the display boundary, secret-bearing files are gitignored, and a `scripts/pre-push` hook + CI (gitleaks + bandit + `pip-audit`) gate every change.
 
 ## End-to-end enablement, Terraform & troubleshooting
 
