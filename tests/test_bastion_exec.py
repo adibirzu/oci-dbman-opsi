@@ -21,6 +21,22 @@ class _FakeExec:
         self.bg.append(argv)
 
 
+class _ListingExec(_FakeExec):
+    def __init__(self, payload: str, *, fail_delete: str | None = None) -> None:
+        super().__init__()
+        self.payload = payload
+        self.fail_delete = fail_delete
+
+    def run(self, argv, input=None):  # noqa: A002 - mirror subprocess signature
+        self.fg.append(argv)
+        joined = " ".join(argv)
+        if "session list" in joined:
+            return self.payload
+        if self.fail_delete and self.fail_delete in joined:
+            raise RuntimeError("delete failed")
+        return "OK"
+
+
 def _runner(ex, **kw):
     return BastionSqlRunner(
         bastion_id="ocid1.bastion.x",
@@ -245,3 +261,50 @@ def test_teardown_is_best_effort_on_delete_failure() -> None:
     # Must not raise even though the delete command fails.
     runner._teardown("ocid1.bastionsession.x")
     assert any("session delete" in c for c in calls)
+
+
+def test_reaps_stale_dbman_sessions_before_creating_new_session(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    payload = (
+        '{"data": ['
+        '{"id": "stale-active", "display-name": "dbman-exec-old-a", '
+        '"lifecycle-state": "ACTIVE", "time-created": "2026-06-13T08:00:00+00:00"},'
+        '{"id": "stale-creating", "display-name": "dbman-exec-old-b", '
+        '"lifecycle-state": "CREATING", "time-created": "2026-06-13T08:01:00+00:00"},'
+        '{"id": "other-tool", "display-name": "other-tool", '
+        '"lifecycle-state": "ACTIVE", "time-created": "2026-06-13T08:00:00+00:00"}'
+        ']}'
+    )
+    ex = _ListingExec(payload)
+    runner = _runner(ex, now=lambda: 1_781_338_000.0, stale_session_age=60)
+
+    runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    commands = [" ".join(command) for command in ex.fg]
+    create_index = next(
+        i for i, command in enumerate(commands) if "create-port-forwarding" in command
+    )
+    pre_create_deletes = [
+        command for command in commands[:create_index] if "session delete" in command
+    ]
+    assert any("--session-id stale-active" in command for command in pre_create_deletes)
+    assert any("--session-id stale-creating" in command for command in pre_create_deletes)
+    assert all("other-tool" not in command for command in pre_create_deletes)
+
+
+def test_reap_delete_failure_does_not_abort_new_session(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"; s1.write_text("-- a")
+    payload = (
+        '{"data": [{"id": "stale-active", "display-name": "dbman-exec-old", '
+        '"lifecycle-state": "ACTIVE", "time-created": "2026-06-13T08:00:00+00:00"}]}'
+    )
+    ex = _ListingExec(payload, fail_delete="--session-id stale-active")
+
+    out = _runner(ex, now=lambda: 1_781_338_000.0, stale_session_age=60).__call__(
+        Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1]
+    )
+
+    flat = " | ".join(" ".join(command) for command in ex.fg)
+    assert "session delete --session-id stale-active" in flat
+    assert "create-port-forwarding" in flat
+    assert "OK" in out
