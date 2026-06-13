@@ -23,7 +23,10 @@ class _OciBase:
         self.runner = runner
 
     def run_json(self, args: list[str]) -> Any:
-        result = self.runner.run(self._base_args() + args + ["--output", "json"])
+        result = self.runner.run(
+            self._base_args() + args + ["--output", "json"],
+            retry_on_transient=True,
+        )
         return result.json()
 
     def run(self, args: list[str]) -> None:

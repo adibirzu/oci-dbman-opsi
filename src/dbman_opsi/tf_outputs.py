@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from dbman_opsi.config import EnablementConfig, Target
+from dbman_opsi.config import ConfigError, EnablementConfig, Target, validate_config
 from dbman_opsi.runner import CommandRunner
 
 
@@ -61,3 +61,11 @@ def merge_outputs_into_config(config: EnablementConfig, outputs: dict[str, Any])
 
     merged = replace(config, network=network, targets=tuple(new_targets))
     return merged, changes
+
+
+def validate_merged_config(config: EnablementConfig) -> None:
+    """Raise ConfigError when imported Terraform values break config validation."""
+
+    problems = validate_config(config)
+    if problems:
+        raise ConfigError(problems)
