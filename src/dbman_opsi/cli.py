@@ -292,7 +292,10 @@ def _latest_journal_run_id(root: Path) -> str:
     matches = list(root.glob("*.jsonl"))
     if not matches:
         raise SystemExit("no run journals found in runs/")
-    return max(matches, key=lambda path: path.stat().st_mtime).stem
+    # Secondary key (name) makes the pick deterministic when two journals share an
+    # mtime (coarse-resolution filesystems); otherwise max() returns an arbitrary
+    # one in glob order.
+    return max(matches, key=lambda path: (path.stat().st_mtime, path.name)).stem
 
 
 def _print_journal_summary(summary: dict[str, object]) -> None:

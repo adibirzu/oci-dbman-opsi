@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -96,8 +97,11 @@ def test_cli_journal_last_json_round_trips_summary(tmp_path: Path, monkeypatch, 
         + json.dumps({"argv_redacted": ["oci", "fail"], "returncode": 1, "duration_ms": 5}) + "\n",
         encoding="utf-8",
     )
-    older.touch()
-    newer.touch()
+    # Explicit, distinct mtimes so `--last` is unambiguous. A double touch() can
+    # land in the same mtime tick on coarse-resolution filesystems (e.g. CI),
+    # making the "newest" pick a flaky tie.
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
     monkeypatch.chdir(tmp_path)
 
     assert main(["journal", "--last", "--json"]) == 0
