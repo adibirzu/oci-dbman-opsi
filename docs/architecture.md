@@ -17,11 +17,14 @@ flowchart LR
   subgraph Local["Operator workstation / Cloud Shell / Resource Manager"]
     CLI["dbman-opsi CLI<br/>(cli.py)"]
     Cfg["Ignored local config<br/>(config.py)"]
+    Journal["Run journal<br/>(journal.py, runs/*.jsonl)"]
     Gen["Generated artifacts<br/>DB SQL · OPSI/Data Safe payloads · agent scripts · handoff"]
   end
 
   CLI --> Cfg
-  CLI --> OciCli["OCI CLI facade<br/>(oci_cli.py + runner.py)"]
+  CLI --> Runner["Command runner<br/>(runner.py)"]
+  Runner --> Journal
+  Runner --> OciCli["OCI CLI facade<br/>(oci_cli.py + _oci_* mixins)"]
   CLI --> TF["Terraform render/run/import<br/>(terraform.py, tf_outputs.py)"]
   CLI --> Gen
 
@@ -42,13 +45,51 @@ flowchart LR
 
 | Layer | Modules | Responsibility |
 | --- | --- | --- |
-| UX / entry | `cli.py`, `wizard.py`, `reporting.py`, `doctor.py` | Commands, interactive planning, human/JSON output, environment checks |
-| Config | `config.py`, `redact.py` | Immutable `EnablementConfig`/`Target`, YAML/JSON round-trip, display redaction |
-| Discover / gate | `discovery.py`, `preflight.py`, `checks.py`, `prerequisites.py`, `db_check.py`, `status.py` | Read-only inventory, three-pillar detection, prerequisite gating |
+| UX / entry | `cli.py`, `wizard.py`, `reporting.py`, `doctor.py` | Commands, interactive planning, human/JSON output, environment checks, run-journal inspection |
+| Config | `config.py`, `redact.py` | Immutable `EnablementConfig`/`Target`, YAML/JSON round-trip, boundary validation, display redaction |
+| Discover / gate | `discovery.py`, `preflight.py`, `checks.py`, `prerequisites.py`, `db_check.py`, `status.py`, `conn.py`, `oci_util.py` | Read-only inventory, three-pillar detection, connection-string parsing, best-effort lookups, prerequisite and DB-spool gating |
 | Act | `orchestrator.py`, `enablement.py`, `datasafe.py`, `iam.py`, `credentials.py`, `db_exec.py` | Detect→branch→gate→enable/handoff; DBM/OPSI/Data Safe enablement; hybrid DB-side execution |
 | Generate | `db_scripts.py`, `opsi_payloads.py`, `agent_scripts.py`, `handoff.py` | DB-side SQL, OPSI/Data Safe payloads, agent bootstrap, DBA handoff packets |
-| Execute | `oci_cli.py`, `runner.py`, `terraform.py`, `tf_outputs.py` | OCI CLI facade, subprocess runner, Terraform render/run/import |
+| Execute | `runner.py`, `journal.py`, `oci_cli.py`, `_oci_base.py`, `_oci_network.py`, `_oci_database.py`, `_oci_dbmgmt.py`, `_oci_opsi.py`, `_oci_datasafe.py`, `_oci_vault.py`, `_oci_iam.py`, `_oci_infra.py`, `terraform.py`, `tf_outputs.py` | Subprocess choke point, redacted run journal, OCI CLI facade composed from per-domain mixins, Terraform render/run/import |
 | Validate | `validation.py`, `remediation.py` | Post-enable verdicts and remediation hints |
+
+## OCI CLI facade and runner choke point
+
+`OciCli` is a flat client assembled from small per-domain mixins. Shared behavior
+(`run_json`, `run`, response unwrapping, profile tenancy lookup) lives in
+`_oci_base.py`; domain modules hold only their OCI command surface. Every OCI and
+Terraform subprocess crosses `CommandRunner`, which is also where command timing,
+redacted journaling, `OciError` classification, and retry/backoff are applied.
+
+```mermaid
+flowchart TD
+  Caller["services and CLI handlers"] --> Facade["OciCli<br/>(oci_cli.py)"]
+  Facade --> Base["_OciBase<br/>run_json / run"]
+  Base --> Runner["CommandRunner<br/>(runner.py)"]
+  Runner --> Journal["RunJournal.record<br/>(journal.py)"]
+  Runner --> OCI["oci command"]
+  Runner --> TF["terraform command"]
+  Runner --> Classify{"non-zero exit?"}
+  Classify -->|auth / not found / throttle / transient| Typed["OciError taxonomy"]
+  Typed --> Retry{"retryable?"}
+  Retry -->|throttled or transient read| Backoff["bounded backoff"]
+  Backoff --> Runner
+  Retry -->|no| Raise["raise typed error"]
+```
+
+The mixin split is organizational only; callers still use one `OciCli` object:
+
+```mermaid
+flowchart LR
+  OciCli["OciCli"] --> Network["_oci_network.py"]
+  OciCli --> Database["_oci_database.py"]
+  OciCli --> Dbmgmt["_oci_dbmgmt.py"]
+  OciCli --> Opsi["_oci_opsi.py"]
+  OciCli --> DataSafe["_oci_datasafe.py"]
+  OciCli --> Vault["_oci_vault.py"]
+  OciCli --> Iam["_oci_iam.py"]
+  OciCli --> Infra["_oci_infra.py"]
+```
 
 ## The three pillars
 
@@ -129,6 +170,10 @@ executor (`db_exec.py`), keeping SQL generation pure.
   `discover` build their OCI CLI with `CommandRunner(dry_run=False)` — a dry-run
   runner stubs every read to `{}`, which would look identical to a missing
   resource. Writes respect `--apply`/`dry_run`.
+- **Boundary validation is explicit.** Config loading calls `validate_config()`;
+  Terraform output import calls `merge_outputs_into_config()` and then
+  `validate_merged_config()` before writing; `preflight --db-check-file` parses
+  the DBA-spooled `04-validate-monitoring-user.sql` output through `db_check.py`.
 - **Redaction is a display concern, applied at the boundary** — never in the data
   path. `runner.run()` returns **raw** stdout so OCID-keyed joins work;
   redaction happens in `--json` output (`redact_data`) and `config.sanitized()`.
@@ -139,10 +184,23 @@ executor (`db_exec.py`), keeping SQL generation pure.
 ```mermaid
 flowchart LR
   OCI["OCI CLI JSON (raw OCIDs)"] --> Runner["runner.run() — RAW"]
+  Runner --> Journal["journal.record() redacted argv only"]
   Runner --> Logic["joins / detection / id lookup"]
   Logic --> JSONOut["--json output"] --> Redact["redact_data → <OCI_OCID>"]
   Logic --> Human["human tables (real OCIDs, operator copies to config)"]
   Runner -.error/dry-run echo.-> RedErr["redact_text"]
+```
+
+```mermaid
+flowchart TD
+  ConfigFile["config YAML or JSON"] --> Load["load_config"]
+  Load --> ConfigValidate["validate_config"]
+  TfState["terraform output JSON"] --> Merge["merge_outputs_into_config"]
+  Merge --> TfValidate["validate_merged_config"]
+  DbSpool["DBA spool file"] --> DbCheck["parse_validation_output"]
+  ConfigValidate --> Commands["CLI command handlers"]
+  TfValidate --> Save["save_config"]
+  DbCheck --> Preflight["preflight report"]
 ```
 
 ## Validation verdict model (OPSI)

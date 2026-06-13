@@ -18,6 +18,7 @@ monitoring password — in the order the script prompts for them.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import re
 import shlex
@@ -26,6 +27,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +80,8 @@ class BastionSqlRunner:
         exec_bg_fn: Callable[[list[str]], Any] | None = None,
         session_id_fn: Callable[[], str] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] = time.time,
+        stale_session_age: int | None = None,
         tunnel_wait: float = 6.0,
         atexit_register: Callable[[Callable[[], None]], Any] = atexit.register,
         atexit_unregister: Callable[[Callable[[], None]], Any] = atexit.unregister,
@@ -97,6 +101,8 @@ class BastionSqlRunner:
         self._exec_bg = exec_bg_fn or _default_exec_bg
         self._session_id_fn = session_id_fn or self._resolve_session_id
         self._sleep = sleeper
+        self._now = now
+        self.stale_session_age = session_ttl if stale_session_age is None else stale_session_age
         self.tunnel_wait = tunnel_wait
         self._atexit_register = atexit_register
         self._atexit_unregister = atexit_unregister
@@ -104,6 +110,7 @@ class BastionSqlRunner:
     # SqlRunner protocol: (target, scripts) -> combined output.
     def __call__(self, target: Target, scripts: list[Path]) -> str:
         display_name = f"dbman-exec-{target.name}".replace(" ", "-").lower()[:60]
+        self._reap_stale_sessions()
         self._exec([
             "oci", "--profile", self.profile, "--region", self.region,
             "bastion", "session", "create-port-forwarding",
@@ -240,10 +247,52 @@ class BastionSqlRunner:
         except Exception:  # noqa: BLE001 - teardown is best-effort
             pass
 
+    def _reap_stale_sessions(self) -> None:
+        try:
+            sessions = self._list_bastion_sessions()
+        except Exception:  # noqa: BLE001 - stale-session sweep is best-effort
+            return
+        for session in sessions:
+            if self._is_stale_dbman_session(session):
+                self._teardown(str(session.get("id") or ""))
+
+    def _list_bastion_sessions(self) -> list[dict[str, Any]]:
+        raw = self._exec([
+            "oci", "--profile", self.profile, "--region", self.region,
+            "bastion", "session", "list", "--bastion-id", self.bastion_id, "--all",
+            "--output", "json",
+        ])
+        payload = json.loads(raw or "{}")
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        return list(data) if isinstance(data, list) else []
+
+    def _is_stale_dbman_session(self, session: dict[str, Any]) -> bool:
+        name = str(session.get("display-name") or "")
+        state = str(session.get("lifecycle-state") or "")
+        session_id = str(session.get("id") or "")
+        created = self._session_created_epoch(session)
+        if not name.startswith("dbman-exec-") or state not in {"ACTIVE", "CREATING"}:
+            return False
+        return bool(
+            session_id
+            and created is not None
+            and self._now() - created > self.stale_session_age
+        )
+
+    @staticmethod
+    def _session_created_epoch(session: dict[str, Any]) -> float | None:
+        value = session.get("time-created")
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
     def _resolve_session_id(self) -> str:
         # Default resolver: list active sessions and return the most recent id.
-        import json
-
         raw = self._exec([
             "oci", "--profile", self.profile, "--region", self.region,
             "bastion", "session", "list", "--bastion-id", self.bastion_id, "--all",
