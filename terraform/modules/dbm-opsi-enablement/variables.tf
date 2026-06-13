@@ -42,6 +42,30 @@ variable "set_preferred_credentials" {
   default     = true
 }
 
+variable "enable_data_safe" {
+  description = "Register each target as a Data Safe target database (security pillar)."
+  type        = bool
+  default     = false
+}
+
+variable "data_safe_private_endpoint_id" {
+  description = "Data Safe private endpoint OCID in the DB subnet. Required when enable_data_safe is true."
+  type        = string
+  default     = null
+}
+
+variable "data_safe_password" {
+  description = <<-EOT
+    Plaintext password for the Data Safe service account (monitoring_user). The
+    oci_data_safe_target_database resource takes a password, not a Vault secret,
+    so it lands in Terraform state — supply via TF_VAR_data_safe_password and keep
+    state encrypted/restricted; never commit it. Required when enable_data_safe is true.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "targets" {
   description = <<-EOT
     Enablement targets keyed by a short name (e.g. "cdb", "pdb1"). For OCI-native
@@ -57,5 +81,8 @@ variable "targets" {
     service_name           = string
     host_ip                = string
     management_type        = optional(string, "ADVANCED")
+    # Parent DB system OCID — required only for Data Safe DATABASE_CLOUD_SERVICE
+    # registration (Base DB / Exadata cloud service).
+    db_system_id           = optional(string)
   }))
 }

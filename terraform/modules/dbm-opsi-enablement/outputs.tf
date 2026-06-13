@@ -12,3 +12,8 @@ output "ops_insights_ids" {
   description = "Operations Insights Database Insight OCIDs, keyed by target."
   value       = { for k, r in oci_opsi_database_insight.insight : k => r.id }
 }
+
+output "data_safe_target_ids" {
+  description = "Data Safe target-database OCIDs, keyed by target."
+  value       = { for k, r in oci_data_safe_target_database.target : k => r.id }
+}

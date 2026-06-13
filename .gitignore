@@ -14,6 +14,7 @@ terraform/**/*.tfstate
 terraform/**/*.tfstate.*
 terraform/**/terraform.tfvars.json
 generated/
+runs/
 dbman-opsi*.yaml
 dbman-opsi*.json
 *.local.yaml
@@ -27,3 +28,7 @@ firebase-debug.log
 .oci-cdp-profile/
 pytest-of-*/
 *-of-abirzu/
+terraform/**/*.auto.tfvars.json
+terraform/**/*.auto.tfvars
+terraform/**/*.tfvars
+terraform/**/.terraform.lock.hcl

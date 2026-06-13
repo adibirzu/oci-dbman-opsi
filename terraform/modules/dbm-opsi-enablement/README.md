@@ -16,6 +16,11 @@ to the others. New capabilities are added as new, independently-gated blocks.
 | `oci_database_management_named_credential` | Vault-backed RESOURCE_PRINCIPAL credential for advanced diagnostics | `set_preferred_credentials` |
 | `null_resource.preferred_credential` (oci CLI) | Wire `PC_READ`/`PC_WRITE` to the named credential (no TF resource exists for this) | `set_preferred_credentials` |
 | `oci_opsi_database_insight` | OPSI PE co-managed Database Insight | `enable_ops_insights` |
+| `oci_data_safe_target_database` | Data Safe target registration over the Data Safe PE (security pillar) | `enable_data_safe` |
+
+Data Safe needs `data_safe_private_endpoint_id`, each target's `db_system_id`, and
+`data_safe_password` (plaintext — the API takes a password, not a Vault secret, so
+it lands in state; pass via `TF_VAR_data_safe_password` and keep state restricted).
 
 ## Usage
 
