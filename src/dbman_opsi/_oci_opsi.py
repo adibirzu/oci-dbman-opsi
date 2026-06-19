@@ -19,6 +19,24 @@ class OpsiCommands(_OciBase):
     # during validate.
     OPSI_INSIGHT_STATES = ("CREATING", "UPDATING", "ACTIVE", "FAILED", "NEEDS_ATTENTION")
 
+    @staticmethod
+    def _summary_rows(data: Any) -> list[dict[str, Any]]:
+        """Normalize OPSI summary responses.
+
+        Some host summary endpoints return ``data.items`` while others return a
+        single aggregate object directly under ``data``. Treat a non-empty data
+        object as one row so diagnostics can distinguish "endpoint returned an
+        aggregate" from "no samples".
+        """
+
+        rows = _OciBase._items(data)
+        if rows:
+            return rows
+        payload = data.get("data") if isinstance(data, dict) else None
+        if isinstance(payload, dict) and "items" in payload:
+            return []
+        return [payload] if isinstance(payload, dict) and payload else []
+
     def list_opsi_private_endpoints(self, compartment_id: str) -> list[dict[str, Any]]:
         data = self.run_json(["opsi", "opsi-private-endpoint", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)
@@ -111,3 +129,75 @@ class OpsiCommands(_OciBase):
             "--database-insight-id",
             insight_id,
         ]))
+
+    def list_opsi_host_insights(self, compartment_id: str) -> list[dict[str, Any]]:
+        data = self.run_json(["opsi", "host-insights", "list", "--compartment-id", compartment_id, "--all"])
+        return self._items(data)
+
+    def summarize_host_top_processes(
+        self,
+        *,
+        compartment_id: str,
+        host_insight_id: str,
+        resource_metric: str,
+        analysis_time_interval: str,
+    ) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "opsi",
+            "host-insights",
+            "summarize-top-processes-usage-trend",
+            "--compartment-id",
+            compartment_id,
+            "--id",
+            host_insight_id,
+            "--resource-metric",
+            resource_metric,
+            "--analysis-time-interval",
+            analysis_time_interval,
+        ])
+        return self._summary_rows(data)
+
+    def summarize_host_resource_usage(
+        self,
+        *,
+        compartment_id: str,
+        host_insight_id: str,
+        resource_metric: str,
+        analysis_time_interval: str,
+    ) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "opsi",
+            "host-insights",
+            "summarize-host-insight-resource-usage",
+            "--compartment-id",
+            compartment_id,
+            "--id",
+            host_insight_id,
+            "--resource-metric",
+            resource_metric,
+            "--analysis-time-interval",
+            analysis_time_interval,
+        ])
+        return self._summary_rows(data)
+
+    def list_importable_macs_cloud_hosts(self, compartment_id: str) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "opsi",
+            "host-insights",
+            "list-macs-cloud-hosts",
+            "--compartment-id",
+            compartment_id,
+            "--all",
+        ])
+        return self._items(data)
+
+    def list_importable_agent_entities(self, compartment_id: str) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "opsi",
+            "host-insights",
+            "list-importable-agent-entities",
+            "--compartment-id",
+            compartment_id,
+            "--all",
+        ])
+        return self._items(data)

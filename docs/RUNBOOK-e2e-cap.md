@@ -463,6 +463,36 @@ Management > Collection issues** and, if the Console still reports the rows afte
 the next collection interval, raise an OCI service request with the redacted API
 evidence above. The CLI path has no safe force-refresh verb for this state.
 
+### Process Insights shows no processes
+
+The Process Insights screenshot for host `dbmanopsi` showed host inventory but
+no top CPU/memory/container processes. The read-only diagnostic command now
+reproduces that state without exposing OCIDs:
+
+```bash
+PYTHONPATH=src python -m dbman_opsi.cli process-insights \
+  --config dbman-opsi.cap-existing.local.yaml \
+  --interval P7D
+```
+
+CAP result on 2026-06-19:
+
+- Host Insights exist for `dbmanopsi` and `dbmanopsidbc`.
+- Both hosts are `COMANAGED-VM-HOST`, `ACTIVE` / `ENABLED`.
+- Host resource summaries are present.
+- Top-process summaries return zero rows for CPU, memory, and virtual memory.
+- Importable MACS cloud hosts: `0`.
+- Importable Management Agent entities: `0`.
+
+This is not a Console rendering issue and not a DBM/SQL Insights failure. The
+current PE co-managed database enablement path can surface host resource
+summaries, but it does not create a process collector for the DB node. Process
+rows require a MACS cloud-host insight or a Management Agent-backed host insight
+that is importable and active. Do not use `ingest-host-metrics` to fabricate PoC
+process data; that would pollute the tenant with synthetic telemetry. The safe
+next step is to enable a supported host collector path for the DB node, then
+rerun `process-insights` and wait for the next collection interval.
+
 Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/account
 name and emails; for operator-pasted images, sensitive bands (header
 region/account/avatar, compartment chip), resource-name columns, SQL ID columns,
