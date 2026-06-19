@@ -26,7 +26,7 @@ def test_merge_fills_network_and_private_endpoint() -> None:
     assert "network.subnet_id" in changes
 
 
-def test_merge_sets_resource_id_for_provisioned_target() -> None:
+def test_merge_sets_db_system_id_for_provisioned_dbcs_target() -> None:
     config = EnablementConfig(
         profile="DEFAULT",
         region="eu-frankfurt-1",
@@ -35,7 +35,8 @@ def test_merge_sets_resource_id_for_provisioned_target() -> None:
 
     merged, _ = merge_outputs_into_config(config, OUTPUTS)
 
-    assert merged.targets[0].resource_id == "dbcs-from-tf"
+    assert merged.targets[0].db_system_id == "dbcs-from-tf"
+    assert merged.targets[0].resource_id is None
 
 
 def test_merge_preserves_existing_private_endpoint() -> None:

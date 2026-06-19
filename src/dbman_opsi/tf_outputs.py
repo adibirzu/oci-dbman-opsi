@@ -52,7 +52,9 @@ def merge_outputs_into_config(config: EnablementConfig, outputs: dict[str, Any])
         if pe_id and target.kind in {"dbcs", "exadata"} and not target.private_endpoint_id:
             updates["private_endpoint_id"] = pe_id
         provisioned_id = dbcs_ids.get(target.name) if target.kind == "dbcs" else adb_ids.get(target.name)
-        if target.provision and provisioned_id and not target.resource_id:
+        if target.provision and target.kind == "dbcs" and provisioned_id and not target.db_system_id:
+            updates["db_system_id"] = provisioned_id
+        if target.provision and target.kind != "dbcs" and provisioned_id and not target.resource_id:
             updates["resource_id"] = provisioned_id
         if updates:
             changes.append(f"target[{target.name}]: {', '.join(sorted(updates))}")

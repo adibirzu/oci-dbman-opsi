@@ -5,6 +5,9 @@ This project is designed for public repository use. Keep tenant-specific data in
 ## Public-Safe Defaults
 
 - Do not commit generated configs, generated SQL payloads, Terraform state, local logs, screenshots, or local MCP files.
+- Do not commit `.env.local`. Keep local operator variables in `.env.local` from
+  `.env.local.example`, set file mode to `0600`, and avoid copying real values
+  into app code, generated docs, screenshots, or Terraform variable files.
 - Do not commit OCIDs, public IPs, private IPs, API key fingerprints, namespaces, endpoint URLs, wallet material, or passwords.
 - Use OCI Vault for database monitoring credentials.
 - Use environment variables for secret input, for example `DBMAN_OPSI_DB_PASSWORD`, then run `prepare-prereqs --password-env DBMAN_OPSI_DB_PASSWORD`.

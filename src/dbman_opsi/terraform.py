@@ -25,6 +25,7 @@ def render_tfvars(config: EnablementConfig) -> dict[str, object]:
         "tenancy_ocid": config.tenancy_id,
         "compartment_ocid": config.compartment_id,
         "region": config.region,
+        "config_file_profile": config.profile,
         "create_test_network": config.network.create_test_network,
         "vcn_ocid": config.network.vcn_id,
         "subnet_ocid": config.network.subnet_id,
@@ -51,4 +52,3 @@ def run_terraform(config: EnablementConfig, runner: CommandRunner) -> None:
     write_tfvars(config, tf_dir)
     runner.run(["terraform", "init"], cwd=tf_dir)
     runner.run(["terraform", "apply", "-auto-approve"], cwd=tf_dir)
-

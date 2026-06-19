@@ -34,6 +34,17 @@ class FakeOci:
         return {"pluggable-database-management-config": {"management-status": "ENABLED"}}
 
 
+class RegionFakeOci(FakeOci):
+    def __init__(self, region):
+        super().__init__([])
+        self.region = region
+        self.database_reads = []
+
+    def get_database(self, database_id):
+        self.database_reads.append((self.region, database_id))
+        return {"database-management-config": {"management-status": "ENABLED"}}
+
+
 class FakeOciWithGet(FakeOci):
     def __init__(self, *args, insight_details=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -355,3 +366,36 @@ def test_validation_reads_pdb_nested_status() -> None:
     assert service.validate(config) == [
         "pdb1 (PDB): Database Management ENABLED; Ops Insights ACTIVE (ENABLED)",
     ]
+
+
+def test_validation_routes_target_reads_to_target_region() -> None:
+    config = EnablementConfig(
+        profile="cap",
+        region="eu-frankfurt-1",
+        compartment_id="compartment-id",
+        targets=(
+            Target(
+                kind="dbcs",
+                name="chicago-cdb",
+                region="us-chicago-1",
+                resource_id="db-id",
+                service_name="cdb.example",
+                compartment_id="compartment-id",
+            ),
+        ),
+    )
+    clients = {
+        "eu-frankfurt-1": RegionFakeOci("eu-frankfurt-1"),
+        "us-chicago-1": RegionFakeOci("us-chicago-1"),
+    }
+    clients["us-chicago-1"].insights = [{"database-id": "db-id", "lifecycle-state": "ACTIVE", "status": "ENABLED"}]
+    service = ValidationService(
+        clients["eu-frankfurt-1"],  # type: ignore[arg-type]
+        oci_for_region=lambda region: clients[region],  # type: ignore[arg-type]
+    )
+
+    assert service.validate(config) == [
+        "chicago-cdb [us-chicago-1] (CDB): Database Management ENABLED; Ops Insights ACTIVE (ENABLED)",
+    ]
+    assert clients["eu-frankfurt-1"].database_reads == []
+    assert clients["us-chicago-1"].database_reads == [("us-chicago-1", "db-id")]

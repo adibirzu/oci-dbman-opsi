@@ -15,11 +15,13 @@ class ValidationService:
         self,
         oci: OciCli,
         *,
+        oci_for_region: Callable[[str], OciCli] | None = None,
         insight_attempts: int = 5,
         insight_delay: float = 2.0,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.oci = oci
+        self.oci_for_region = oci_for_region or (lambda _region: self.oci)
         self.insight_attempts = max(1, insight_attempts)
         self.insight_delay = insight_delay
         self.sleeper = sleeper
@@ -27,36 +29,41 @@ class ValidationService:
     def validate(self, config: EnablementConfig) -> list[str]:
         findings: list[str] = []
         for target in config.targets:
+            region = target.region or config.region
+            oci = self.oci_for_region(region)
+            region_suffix = f" [{region}]" if region != config.region else ""
             if target.kind in {"external-db", "external-exadata"}:
-                agents = self.oci.list_management_agents(target.compartment_id or config.compartment_id or "")
+                agents = oci.list_management_agents(target.compartment_id or config.compartment_id or "")
                 matched = [agent for agent in agents if target.name.lower() in str(agent.get("display-name", "")).lower()]
                 if not matched:
-                    findings.append(f"{target.name}: Management Agent not found yet")
+                    findings.append(f"{target.name}{region_suffix}: Management Agent not found yet")
                     continue
-                findings.append(f"{target.name}: Management Agent registered")
+                findings.append(f"{target.name}{region_suffix}: Management Agent registered")
             elif not target.resource_id:
-                findings.append(f"{target.name}: missing resource OCID")
+                findings.append(f"{target.name}{region_suffix}: missing resource OCID")
             elif target.kind == "autonomous":
-                details = self.oci.get_autonomous_database(target.resource_id)
+                details = oci.get_autonomous_database(target.resource_id)
                 dbmgmt = dbm_status(details, target.kind) or "NOT_ENABLED"
                 opsi = opsi_status(details, target.kind) or "NOT_ENABLED"
-                findings.append(f"{target.name}: Database Management {dbmgmt}; Ops Insights {opsi}")
+                findings.append(f"{target.name}{region_suffix}: Database Management {dbmgmt}; Ops Insights {opsi}")
             elif target.kind in {"dbcs", "exadata"}:
                 if target.database_role == "PDB":
-                    details = self.oci.get_pluggable_database(target.resource_id)
+                    details = oci.get_pluggable_database(target.resource_id)
                 else:
-                    details = self.oci.get_database(target.resource_id)
+                    details = oci.get_database(target.resource_id)
                 dbmgmt = dbm_status(details, target.kind, target.database_role) or "NOT_ENABLED"
-                opsi = self._opsi_insight_state(target, config)
+                opsi = self._opsi_insight_state(target, config, oci)
                 findings.append(
-                    f"{target.name} ({target.database_role}): Database Management {dbmgmt}; "
+                    f"{target.name}{region_suffix} ({target.database_role}): Database Management {dbmgmt}; "
                     f"Ops Insights {opsi}"
                 )
             else:
-                findings.append(f"{target.name}: validate Database Management and Ops Insights status in OCI Console/API")
+                findings.append(
+                    f"{target.name}{region_suffix}: validate Database Management and Ops Insights status in OCI Console/API"
+                )
         return findings
 
-    def _opsi_insight_state(self, target: "Target", config: EnablementConfig) -> str:
+    def _opsi_insight_state(self, target: "Target", config: EnablementConfig, oci: OciCli) -> str:
         """Resolve the real OPSI Database Insight lifecycle for a DBCS/Exadata target.
 
         Returns e.g. ``ACTIVE (ENABLED)``, ``FAILED (ENABLED)``,
@@ -93,7 +100,7 @@ class ValidationService:
 
         # 1. Authoritative path: GET by known insight OCID.
         if target.opsi_database_insight_id:
-            state = self._insight_state_by_id(target.opsi_database_insight_id)
+            state = self._insight_state_by_id(oci, target.opsi_database_insight_id)
             if state is not None:
                 return state
 
@@ -107,13 +114,13 @@ class ValidationService:
         answered_id_sets: list[frozenset[str]] = []
         clean_window = True
         for attempt in range(self.insight_attempts):
-            insights, complete = self._list_insights(compartment)
+            insights, complete = self._list_insights(oci, compartment)
             for insight in insights or []:
                 if insight.get("database-id") == target.resource_id:
                     # Positive hit: prefer the reliable GET for the real state.
                     insight_id = insight.get("id")
                     if insight_id:
-                        state = self._insight_state_by_id(str(insight_id))
+                        state = self._insight_state_by_id(oci, str(insight_id))
                         if state is not None:
                             return state
                     state = insight.get("lifecycle-state") or "UNKNOWN"
@@ -136,7 +143,7 @@ class ValidationService:
             return "NOT_FOUND (no Database Insight)"
         return "UNKNOWN (insight query failed; verify in OCI Console)"
 
-    def _list_insights(self, compartment: str) -> tuple[list[dict[str, object]], bool]:
+    def _list_insights(self, oci: OciCli, compartment: str) -> tuple[list[dict[str, object]], bool]:
         """Return ``(insights, complete)`` from the OPSI list facade.
 
         Uses :meth:`OciCli.list_opsi_database_insights_complete` when available so
@@ -145,7 +152,7 @@ class ValidationService:
         (treated as complete, with a RuntimeError counted as an erroring read).
         """
 
-        complete_getter = getattr(self.oci, "list_opsi_database_insights_complete", None)
+        complete_getter = getattr(oci, "list_opsi_database_insights_complete", None)
         if complete_getter is not None:
             try:
                 insights, complete = complete_getter(compartment)
@@ -153,18 +160,18 @@ class ValidationService:
                 return [], False
             return list(insights or []), bool(complete)
         try:
-            return list(self.oci.list_opsi_database_insights(compartment) or []), True
+            return list(oci.list_opsi_database_insights(compartment) or []), True
         except RuntimeError:
             return [], False
 
-    def _insight_state_by_id(self, insight_id: str) -> str | None:
+    def _insight_state_by_id(self, oci: OciCli, insight_id: str) -> str | None:
         """Read an insight's state via the reliable single-resource GET.
 
         Returns ``"<lifecycle> (<status>)"`` or ``None`` when the GET could not
         be read (so the caller can fall back to the list path).
         """
 
-        getter = getattr(self.oci, "get_opsi_database_insight", None)
+        getter = getattr(oci, "get_opsi_database_insight", None)
         if getter is None:
             return None
         for _ in range(2):

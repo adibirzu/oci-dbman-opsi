@@ -14,8 +14,9 @@ from pathlib import Path
 
 from dbman_opsi.agent_scripts import generate_agent_scripts
 from dbman_opsi.bastion_exec import BastionSqlRunner
-from dbman_opsi.config import EnablementConfig, load_config, save_config
+from dbman_opsi.config import ConfigError, EnablementConfig, load_config, save_config, validate_config
 from dbman_opsi.credentials import CredentialService
+from dbman_opsi.cross_region import cross_region_plan, format_cross_region_plan, parse_regions
 from dbman_opsi.datasafe import DataSafeDecision, DataSafeService
 from dbman_opsi.db_check import parse_validation_output
 from dbman_opsi.db_exec import DbExecService
@@ -23,12 +24,20 @@ from dbman_opsi.db_scripts import generate_db_scripts
 from dbman_opsi.discovery import DiscoveryService
 from dbman_opsi.doctor import check_environment, check_session, summarize_checks
 from dbman_opsi.enablement import EnablementService
+from dbman_opsi.envfile import load_env_file
 from dbman_opsi.journal import RunJournal, summarize
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.opsi_payloads import generate_opsi_payloads
 from dbman_opsi.orchestrator import ConfigureReport, ConfigureService
 from dbman_opsi.preflight import PreflightService
 from dbman_opsi.prerequisites import PrerequisiteService
+from dbman_opsi.regional_provisioning import (
+    CHICAGO_REGION,
+    RegionalProvisioningRequest,
+    build_regional_provisioning_config,
+    default_regional_output,
+    prepare_regional_terraform_dir,
+)
 from dbman_opsi.redact import redact_data
 from dbman_opsi.reporting import print_configure_report, print_inventory, print_preflight_report
 from dbman_opsi.runner import CommandRunner
@@ -82,6 +91,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_args(provision)
     provision.add_argument("--render-only", action="store_true", help="Only write terraform.tfvars.json")
 
+    init_region = add_parser(
+        "init-region",
+        help="Create a region-specific provisioning config for a second-region PoC (defaults to Chicago)",
+    )
+    init_region.add_argument("--config", default="dbman-opsi.yaml")
+    init_region.add_argument("--region", default=CHICAGO_REGION)
+    init_region.add_argument("--output", help="Output config path (default: dbman-opsi.<region>.local.yaml)")
+    init_region.add_argument("--terraform-dir", help="Terraform work directory for this region")
+    init_region.add_argument("--target-name", help="Provisioned database target name")
+    init_region.add_argument("--target-kind", choices=("dbcs", "autonomous"), default="dbcs")
+    init_region.add_argument("--vcn-id", help="Existing VCN OCID in the selected region")
+    init_region.add_argument("--subnet-id", help="Existing private subnet OCID in the selected region")
+
     import_outputs = add_parser(
         "import-tf-outputs",
         help="Read terraform outputs and merge created OCIDs (subnet, PE, provisioned DBs) back into the config",
@@ -110,6 +132,16 @@ def build_parser() -> argparse.ArgumentParser:
     validate = add_parser("validate", help="Validate registrations and collection readiness")
     _add_config_args(validate)
 
+    cross_region = add_parser(
+        "cross-region",
+        help="Configure and summarize the OPSI multi-region Explorer/dashboard POC selection",
+    )
+    cross_region.add_argument("--config", default="dbman-opsi.yaml")
+    cross_region.add_argument(
+        "--regions",
+        help="Comma-separated OCI regions to select in Ops Insights Explorer and supported dashboards",
+    )
+
     preflight = add_parser("preflight", help="Read-only check of all enablement prerequisites")
     preflight.add_argument("--config", default="dbman-opsi.yaml")
     preflight.add_argument("--json", action="store_true", help="Emit the report as JSON")
@@ -126,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--apply", action="store_true", help="Enable services when all prerequisites pass")
     configure.add_argument("--db-side-only", action="store_true", help="Generate DB-side handoff packets and stop")
     configure.add_argument("--force", action="store_true", help="Ignore blocking prerequisite failures")
+    configure.add_argument(
+        "--skip-credentials",
+        action="store_true",
+        help="Do not set DBM advanced-diagnostics preferred credentials after configuring",
+    )
     configure.add_argument("--output", default="generated/handoff", help="Handoff packet output directory")
     configure.add_argument("--json", action="store_true", help="Emit the report as JSON")
     configure.add_argument(
@@ -343,6 +380,35 @@ def _cmd_provision(args: argparse.Namespace, ctx: _CliContext) -> int:
     return 0
 
 
+def _cmd_init_region(args: argparse.Namespace, ctx: _CliContext) -> int:
+    base = load_config(args.config)
+    try:
+        config = build_regional_provisioning_config(
+            base,
+            RegionalProvisioningRequest(
+                region=args.region,
+                target_kind=args.target_kind,
+                target_name=args.target_name,
+                terraform_dir=args.terraform_dir,
+                vcn_id=args.vcn_id,
+                subnet_id=args.subnet_id,
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    problems = validate_config(config)
+    if problems:
+        raise ConfigError(problems)
+    output = args.output or default_regional_output(args.region)
+    save_config(output, config)
+    copied = prepare_regional_terraform_dir(base.terraform_dir, config.terraform_dir)
+    print(f"Wrote regional provisioning config to {output}")
+    if copied:
+        print(f"Prepared Terraform workdir {config.terraform_dir}")
+    print(f"Next: dbman-opsi provision --config {output} --render-only")
+    return 0
+
+
 def _cmd_enable(args: argparse.Namespace, ctx: _CliContext) -> int:
     config = load_config(args.config)
     dry_run = not args.apply and (args.dry_run or config.dry_run)
@@ -366,11 +432,41 @@ def _cmd_prepare_prereqs(args: argparse.Namespace, ctx: _CliContext) -> int:
 
 def _cmd_validate(args: argparse.Namespace, ctx: _CliContext) -> int:
     config = load_config(args.config)
+
+    def oci_for_region(region: str) -> OciCli:
+        return OciCli(
+            config.profile,
+            region,
+            _make_runner(
+                dry_run=False,
+                run_id=ctx.run_id,
+                profile=config.profile,
+                region=region,
+                verbose=ctx.verbose,
+            ),
+        )
+
     # Regression R2, formerly under `if args.command == "validate":`:
     # validate is read-only and must remain equivalent to CommandRunner(dry_run=False).
-    findings = ValidationService(_config_oci(config, ctx, dry_run=False)).validate(config)
+    findings = ValidationService(
+        _config_oci(config, ctx, dry_run=False),
+        oci_for_region=oci_for_region,
+    ).validate(config)
     for finding in findings:
         print(f"- {finding}")
+    return 0
+
+
+def _cmd_cross_region(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+    if args.regions:
+        config = replace(config, monitoring_regions=parse_regions(args.regions))
+        problems = validate_config(config)
+        if problems:
+            raise ConfigError(problems)
+        save_config(args.config, config)
+        print(f"Updated monitoring_regions in {args.config}")
+    print(format_cross_region_plan(cross_region_plan(config)))
     return 0
 
 
@@ -408,6 +504,8 @@ def _cmd_import_tf_outputs(args: argparse.Namespace, ctx: _CliContext) -> int:
         _config_runner(config, ctx, dry_run=False),
     )
     merged, changes = merge_outputs_into_config(config, outputs)
+    merged, resolved_changes = _resolve_provisioned_dbcs_databases(merged, ctx)
+    changes.extend(resolved_changes)
     if not changes:
         print("No new values to import from terraform outputs.")
         return 0
@@ -420,6 +518,41 @@ def _cmd_import_tf_outputs(args: argparse.Namespace, ctx: _CliContext) -> int:
     save_config(args.config, merged)
     print(f"Wrote merged config to {args.config}")
     return 0
+
+
+def _resolve_provisioned_dbcs_databases(
+    config: EnablementConfig,
+    ctx: _CliContext,
+) -> tuple[EnablementConfig, list[str]]:
+    """Resolve Terraform-created DB system IDs to database IDs for enablement."""
+
+    changes: list[str] = []
+    targets = []
+    oci = _config_oci(config, ctx, dry_run=False)
+    for target in config.targets:
+        if not (target.provision and target.kind == "dbcs" and target.db_system_id):
+            targets.append(target)
+            continue
+        needs_database_id = not target.resource_id or target.resource_id == target.db_system_id
+        if not needs_database_id:
+            targets.append(target)
+            continue
+        databases = oci.list_databases(target.compartment_id or config.compartment_id or "", target.db_system_id)
+        if not databases:
+            targets.append(target)
+            continue
+        database = databases[0]
+        database_id = database.get("id")
+        if not database_id:
+            targets.append(target)
+            continue
+        updates = {"resource_id": database_id}
+        if not target.service_name and database.get("db-name"):
+            updates["service_name"] = database["db-name"]
+        target = replace(target, **updates)
+        changes.append(f"target[{target.name}]: resource_id")
+        targets.append(target)
+    return replace(config, targets=tuple(targets)), changes
 
 
 def _cmd_preflight(args: argparse.Namespace, ctx: _CliContext) -> int:
@@ -462,10 +595,20 @@ def _cmd_configure(args: argparse.Namespace, ctx: _CliContext) -> int:
     report: ConfigureReport = service.configure(
         config, mode=mode, handoff_dir=args.output, force=args.force
     )
+    credential_decisions = []
+    if mode == "apply" and report.ok and not args.skip_credentials:
+        credential_decisions = CredentialService(
+            _config_oci(config, ctx, dry_run=False)
+        ).set_all(config)
     if args.json:
-        print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
+        payload = report.to_dict()
+        if credential_decisions:
+            payload["credentials"] = [decision.__dict__ for decision in credential_decisions]
+        print(json.dumps(redact_data(payload), indent=2, sort_keys=True))
     else:
         print_configure_report(report)
+        for decision in credential_decisions:
+            print(f"- credentials {decision.target}: {decision.status} ({decision.detail})")
     return 0 if report.ok else 1
 
 
@@ -543,9 +686,11 @@ def _command_handlers():
         "journal": _cmd_journal,
         "doctor": _cmd_doctor,
         "provision": _cmd_provision,
+        "init-region": _cmd_init_region,
         "enable": _cmd_enable,
         "prepare-prereqs": _cmd_prepare_prereqs,
         "validate": _cmd_validate,
+        "cross-region": _cmd_cross_region,
         "set-credentials": _cmd_set_credentials,
         "discover": _cmd_discover,
         "import-tf-outputs": _cmd_import_tf_outputs,
@@ -562,6 +707,7 @@ def _command_handlers():
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging()
+    load_env_file()
     ctx = _CliContext(run_id=str(uuid.uuid4()), verbose=args.verbose)
     log.debug("run_id=%s", ctx.run_id)
     handler = _command_handlers().get(args.command)

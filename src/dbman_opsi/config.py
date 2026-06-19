@@ -21,6 +21,7 @@ DEFAULT_SERVICES: tuple[Service, ...] = ("dbm", "opsi")
 ALLOWED_TARGET_KINDS = frozenset(get_args(TargetKind))
 ALLOWED_SERVICES = frozenset(get_args(Service))
 OCID_PREFIX_RE = re.compile(r"^ocid1\.[a-z0-9]+\.oc[0-9]\.")
+REGION_RE = re.compile(r"^[a-z]+-[a-z]+-[0-9]+$")
 MAX_OCID_LENGTH = 255
 
 
@@ -83,6 +84,10 @@ class Target:
     # Which pillars to enable for this target. Defaults to DBM + OPSI so existing
     # configs (which omit the field) keep their prior behavior; Data Safe is opt-in.
     services: tuple[Service, ...] = DEFAULT_SERVICES
+    # Optional override for targets that live outside the config home region.
+    # Appended to preserve the positional dataclass argument order used by older
+    # callers.
+    region: str | None = None
 
     def wants(self, service: Service) -> bool:
         return service in self.services
@@ -92,6 +97,7 @@ class Target:
 class EnablementConfig:
     profile: str
     region: str
+    monitoring_regions: tuple[str, ...] = ()
     tenancy_id: str | None = None
     compartment_id: str | None = None
     network: NetworkSelection = field(default_factory=NetworkSelection)
@@ -133,6 +139,7 @@ def from_dict(value: dict[str, Any]) -> EnablementConfig:
     return EnablementConfig(
         profile=value["profile"],
         region=value["region"],
+        monitoring_regions=tuple(value.get("monitoring_regions") or ()),
         tenancy_id=value.get("tenancy_id"),
         compartment_id=value.get("compartment_id"),
         network=_network_from_dict(value.get("network")),
@@ -148,6 +155,7 @@ def validate_config(config: EnablementConfig) -> list[str]:
     """Return all config validation problems without mutating config."""
 
     problems = _validate_config_ocid_fields(config)
+    problems.extend(_validate_regions("monitoring_regions", config.monitoring_regions))
     for index, target in enumerate(config.targets):
         target_label = f"targets[{index}] {target.name}"
         problems.extend(_validate_target(target, target_label))
@@ -160,13 +168,25 @@ def _validate_target(target: Target, label: str) -> list[str]:
     if target.kind not in ALLOWED_TARGET_KINDS:
         expected = ", ".join(sorted(ALLOWED_TARGET_KINDS))
         problems.append(f"{label}: kind must be one of {expected}")
+    if target.region and not _looks_like_region(target.region):
+        problems.append(f"{label}: region must look like an OCI region identifier")
     invalid_services = sorted(service for service in target.services if service not in ALLOWED_SERVICES)
     if invalid_services:
         values = ", ".join(str(service) for service in invalid_services)
         problems.append(f"{label}: services contains unsupported values: {values}")
-    if target.kind != "autonomous" and not target.service_name:
+    if target.kind != "autonomous" and not target.provision and not target.service_name:
         problems.append(f"{label}: service_name is required for {target.kind} targets")
     return problems
+
+
+def _validate_regions(label: str, regions: tuple[str, ...]) -> list[str]:
+    invalid = [region for region in regions if not _looks_like_region(region)]
+    if invalid:
+        return [f"{label} contains invalid OCI region identifiers: {', '.join(invalid)}"]
+    duplicates = sorted({region for region in regions if regions.count(region) > 1})
+    if duplicates:
+        return [f"{label} contains duplicate regions: {', '.join(duplicates)}"]
+    return []
 
 
 def _validate_config_ocid_fields(config: EnablementConfig) -> list[str]:
@@ -232,10 +252,15 @@ def _looks_like_ocid(value: object) -> bool:
     )
 
 
+def _looks_like_region(value: object) -> bool:
+    return isinstance(value, str) and REGION_RE.match(value) is not None
+
+
 def to_dict(config: EnablementConfig) -> dict[str, Any]:
     return {
         "profile": config.profile,
         "region": config.region,
+        "monitoring_regions": list(config.monitoring_regions),
         "tenancy_id": config.tenancy_id,
         "compartment_id": config.compartment_id,
         "network": config.network.__dict__,
