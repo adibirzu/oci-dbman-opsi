@@ -7,7 +7,7 @@ import pytest
 
 from dbman_opsi.checks import PreflightReport, fail, ok
 from dbman_opsi.cli import main
-from dbman_opsi.config import ConfigError, EnablementConfig, NetworkSelection, Target, save_config
+from dbman_opsi.config import ConfigError, EnablementConfig, NetworkSelection, Target, load_config, save_config
 from dbman_opsi.orchestrator import ConfigureReport, TargetDecision
 
 
@@ -57,6 +57,75 @@ def test_cli_provision_render_only(tmp_path: Path) -> None:
 
     assert main(["provision", "--config", str(config_path), "--render-only"]) == 0
     assert (terraform_dir / "terraform.tfvars.json").exists()
+
+
+def test_cli_loads_dotenv_before_provision(tmp_path: Path, monkeypatch) -> None:
+    terraform_dir = tmp_path / "tf"
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            terraform_dir=str(terraform_dir),
+        ),
+    )
+    tmp_path.joinpath(".env.local").write_text("DBMAN_OPSI_TEST_LOADED=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DBMAN_OPSI_TEST_LOADED", raising=False)
+
+    assert main(["provision", "--config", str(config_path), "--render-only"]) == 0
+
+    assert os.environ["DBMAN_OPSI_TEST_LOADED"] == "yes"
+
+
+def test_cli_init_region_writes_chicago_provisioning_config(tmp_path: Path, capsys) -> None:
+    base_config = tmp_path / "base.yaml"
+    output_config = tmp_path / "chicago.yaml"
+    terraform_dir = tmp_path / "zero-start-poc"
+    terraform_dir.mkdir()
+    terraform_dir.joinpath("main.tf").write_text("terraform {}\n", encoding="utf-8")
+    save_config(
+        base_config,
+        EnablementConfig(
+            profile="cap",
+            region="eu-frankfurt-1",
+            tenancy_id=TENANCY_ID,
+            compartment_id=COMPARTMENT_ID,
+            terraform_dir=str(terraform_dir),
+        ),
+    )
+
+    assert main(
+        [
+            "init-region",
+            "--config",
+            str(base_config),
+            "--output",
+            str(output_config),
+            "--target-kind",
+            "autonomous",
+        ]
+    ) == 0
+
+    generated = load_config(output_config)
+    assert generated.profile == "cap"
+    assert generated.region == "us-chicago-1"
+    assert generated.network.create_test_network is True
+    assert generated.terraform_dir == str(tmp_path / "zero-start-poc-us-chicago-1")
+    assert (tmp_path / "zero-start-poc-us-chicago-1" / "main.tf").exists()
+    assert generated.targets[0].kind == "autonomous"
+    assert generated.targets[0].provision is True
+    assert "dbman-opsi provision --config" in capsys.readouterr().out
+
+
+def test_cli_init_region_requires_complete_existing_network(tmp_path: Path) -> None:
+    base_config = tmp_path / "base.yaml"
+    save_config(base_config, EnablementConfig(profile="cap", region="eu-frankfurt-1"))
+
+    with pytest.raises(SystemExit, match="--vcn-id and --subnet-id"):
+        main(["init-region", "--config", str(base_config), "--vcn-id", VCN_ID])
 
 
 def test_cli_threads_single_run_id_into_journaled_runners(tmp_path: Path, monkeypatch) -> None:
@@ -203,6 +272,36 @@ def test_cli_generate_opsi_payloads(tmp_path: Path) -> None:
     assert (output_dir / "cloud-db" / "credential-details.json").exists()
 
 
+def test_cli_cross_region_updates_config_and_prints_poc_steps(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="cap",
+            region="eu-frankfurt-1",
+            targets=(
+                Target(kind="dbcs", name="frankfurt-cdb", service_name="cdb.example"),
+                Target(kind="autonomous", name="chicago-adb", region="us-chicago-1"),
+            ),
+        ),
+    )
+
+    assert main(
+        [
+            "cross-region",
+            "--config",
+            str(config_path),
+            "--regions",
+            "eu-frankfurt-1,us-chicago-1",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "OPSI cross-region monitoring: enabled" in output
+    assert "Data Object Explorer" in output
+    assert load_config(config_path).monitoring_regions == ("eu-frankfurt-1", "us-chicago-1")
+
+
 def test_cli_prepare_prereqs_dry_run(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.yaml"
     save_config(
@@ -328,6 +427,73 @@ def test_cli_configure_db_side_only_uses_handoff_mode(tmp_path: Path, monkeypatc
     assert "[HANDOFF] cloud db" in capsys.readouterr().out
 
 
+def test_cli_configure_apply_sets_preferred_credentials(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+    captured: dict[str, object] = {}
+
+    class FakeConfigure:
+        def __init__(self, oci, enablement=None, datasafe=None) -> None:
+            pass
+
+        def configure(self, config, mode="plan", handoff_dir="x", force=False):
+            return ConfigureReport(
+                mode=mode,
+                preflight=PreflightReport(),
+                decisions=(TargetDecision("cloud db", "dbcs", "oci-native", "enabled", "done"),),
+            )
+
+    class FakeCredentialService:
+        def __init__(self, oci) -> None:
+            pass
+
+        def set_all(self, config):
+            captured["credential_config"] = config
+            from dbman_opsi.credentials import CredentialDecision
+
+            return [CredentialDecision("cloud db", "set", "PC_READ, PC_WRITE configured")]
+
+    monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
+    monkeypatch.setattr("dbman_opsi.cli.CredentialService", FakeCredentialService)
+
+    assert main(["configure", "--config", str(config_path), "--apply"]) == 0
+
+    assert captured["credential_config"] is not None
+    assert "credentials cloud db: set" in capsys.readouterr().out
+
+
+def test_cli_configure_apply_can_skip_preferred_credentials(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    _save_basic_config(config_path)
+    captured = {"credentials_called": False}
+
+    class FakeConfigure:
+        def __init__(self, oci, enablement=None, datasafe=None) -> None:
+            pass
+
+        def configure(self, config, mode="plan", handoff_dir="x", force=False):
+            return ConfigureReport(
+                mode=mode,
+                preflight=PreflightReport(),
+                decisions=(TargetDecision("cloud db", "dbcs", "oci-native", "enabled", "done"),),
+            )
+
+    class FakeCredentialService:
+        def __init__(self, oci) -> None:
+            pass
+
+        def set_all(self, config):
+            captured["credentials_called"] = True
+            return []
+
+    monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
+    monkeypatch.setattr("dbman_opsi.cli.CredentialService", FakeCredentialService)
+
+    assert main(["configure", "--config", str(config_path), "--apply", "--skip-credentials"]) == 0
+
+    assert captured["credentials_called"] is False
+
+
 def test_cli_import_tf_outputs_merges_and_writes(tmp_path: Path, monkeypatch) -> None:
     from dbman_opsi.config import load_config
 
@@ -354,6 +520,47 @@ def test_cli_import_tf_outputs_merges_and_writes(tmp_path: Path, monkeypatch) ->
     reloaded = load_config(config_path)
     assert reloaded.network.subnet_id == SUBNET_ID
     assert reloaded.targets[0].private_endpoint_id == PRIVATE_ENDPOINT_ID
+
+
+def test_cli_import_tf_outputs_resolves_provisioned_dbcs_database_id(tmp_path: Path, monkeypatch) -> None:
+    from dbman_opsi.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            targets=(Target(kind="dbcs", name="cloud db", provision=True),),
+        ),
+    )
+
+    monkeypatch.setattr(
+        "dbman_opsi.cli.read_terraform_outputs",
+        lambda terraform_dir, runner: {
+            "provisioned_dbcs_ids": {"value": {"cloud db": DB_SYSTEM_ID}},
+            "provisioned_autonomous_database_ids": {"value": {}},
+        },
+    )
+
+    class FakeOci:
+        def __init__(self, profile, region, runner) -> None:
+            pass
+
+        def list_databases(self, compartment_id: str, db_system_id: str):
+            assert compartment_id == COMPARTMENT_ID
+            assert db_system_id == DB_SYSTEM_ID
+            return [{"id": DATABASE_ID, "db-name": "CDB1"}]
+
+    monkeypatch.setattr("dbman_opsi.cli.OciCli", FakeOci)
+
+    assert main(["import-tf-outputs", "--config", str(config_path)]) == 0
+
+    reloaded = load_config(config_path)
+    assert reloaded.targets[0].db_system_id == DB_SYSTEM_ID
+    assert reloaded.targets[0].resource_id == DATABASE_ID
+    assert reloaded.targets[0].service_name == "CDB1"
 
 
 def test_cli_import_tf_outputs_dry_run_does_not_write(tmp_path: Path, monkeypatch, capsys) -> None:

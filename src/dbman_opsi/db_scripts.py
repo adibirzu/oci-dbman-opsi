@@ -283,9 +283,9 @@ Run order:
 
 1. `01-create-monitoring-user.sql`
 2. `02-grant-basic-monitoring.sql`
-3. Optional: `03-grant-advanced-diagnostics.sql` (Performance Hub + SQL Tuning Set privileges)
-4. Optional: `05-enable-performance-hub.sql` (AWR autoflush so ADDM Spotlight / AWR
-   Explorer collect data — required for PDB-level ADDM/AWR; run for the CDB and each PDB)
+3. `03-grant-advanced-diagnostics.sql` (Performance Hub + SQL Tuning Set privileges)
+4. `05-enable-performance-hub.sql` (AWR autoflush so ADDM Spotlight / AWR Explorer
+   collect data — required for PDB-level ADDM/AWR; run for the CDB and each PDB)
 5. `04-validate-monitoring-user.sql`{data_safe_step}
 
 Run from SQL*Plus or SQLcl as SYSDBA or an equivalent administrative account:
@@ -329,4 +329,3 @@ def generate_db_scripts(config: EnablementConfig, output_dir: str | Path) -> lis
             path.write_text(content, encoding="utf-8")
             paths.append(path)
     return paths
-

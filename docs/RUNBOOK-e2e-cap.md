@@ -289,6 +289,91 @@ and only re-raises after exhausting them. (`enablement.py`; tests in
   discovery: CDB `dbmanops` `dbm=ENABLED, opsi=ENABLED, ds=ENABLED`; both Data
   Safe targets **ACTIVE**.
 
+## Phase 7 — Cross-region OPSI showcase (Chicago)
+
+Goal: show the new Ops Insights multi-region experience from one Console flow:
+Data Object Explorer queries selected regions and aggregates results; the
+Configuration and Capacity dashboards use the same selected regions.
+
+Provision one additional target in `us-chicago-1` for the POC. Generate a
+separate gitignored config whose top-level `region` is `us-chicago-1` while
+reusing the same tenancy/profile/compartment pattern:
+
+```bash
+dbman-opsi init-region --config dbman-opsi.cap.local.yaml \
+  --region us-chicago-1 \
+  --output dbman-opsi.cap-chicago.local.yaml \
+  --target-kind dbcs
+dbman-opsi provision --config dbman-opsi.cap-chicago.local.yaml --render-only
+# review terraform/examples/zero-start-poc-us-chicago-1/terraform.tfvars.json, then:
+dbman-opsi provision --config dbman-opsi.cap-chicago.local.yaml --apply
+dbman-opsi import-tf-outputs --config dbman-opsi.cap-chicago.local.yaml
+dbman-opsi db-exec --config dbman-opsi.cap-chicago.local.yaml --apply \
+  --bastion-id <bastion> --target-ip <db-ip> --ssh-key <key>
+dbman-opsi configure --config dbman-opsi.cap-chicago.local.yaml --apply
+dbman-opsi validate --config dbman-opsi.cap-chicago.local.yaml
+```
+
+For Autonomous Database, use `--target-kind autonomous` and provide
+`TF_VAR_adb_admin_password` through the environment. For DBCS, provide the SSH
+public key and `TF_VAR_db_admin_password`; keep the generated Terraform secret
+variables in ignored local files only. `init-region` creates a test VCN/subnet by
+default; pass `--vcn-id <regional-vcn> --subnet-id <regional-private-subnet>` to
+reuse an existing Chicago network.
+
+Local paid provisioning uses `.env.local` as the operator-owned secret boundary:
+
+```bash
+cp .env.local.example .env.local
+chmod 600 .env.local
+# Fill in TF_VAR_db_admin_password and TF_VAR_ssh_public_keys locally.
+# Set TF_VAR_create_identity_policy=false when IAM is managed outside this stack.
+```
+
+The CLI loads `.env.local` automatically. Do not paste real values into this
+runbook, generated configs, screenshots, `terraform.tfvars.json`, or public app
+code. Terraform state is also local-sensitive after apply; keep it in the
+gitignored regional work directory and restrict access to the workstation.
+
+After Chicago is enabled, add the Chicago target to the combined CAP showcase
+config with `region: us-chicago-1` on that target, then declare the Console region
+selector set:
+
+```bash
+dbman-opsi cross-region --config dbman-opsi.cap.local.yaml \
+  --regions eu-frankfurt-1,us-chicago-1
+dbman-opsi validate --config dbman-opsi.cap.local.yaml
+```
+
+Expected API state: Frankfurt and Chicago targets validate from their own regions;
+DBCS/PDB targets show DBM `ENABLED`/`ADVANCED` and OPSI `ACTIVE`, while Autonomous
+targets show Database Management and Ops Insights enabled on the Autonomous DB
+resource.
+
+Expected Console state: in Ops Insights Data Object Explorer, select
+`eu-frankfurt-1` and `us-chicago-1` in the region selector, run the query, and
+verify returned rows include region context. Repeat the same region selection on
+the Configuration and Capacity dashboards.
+
+CAP verification note: the Chicago DBCS path has been generated and checked with
+`terraform init -backend=false` plus `terraform validate` in
+`terraform/examples/zero-start-poc-us-chicago-1/`. On 2026-06-19 the paid
+Chicago DBCS resource was created with local-only variables loaded from
+`.env.local`; Terraform state now manages the VCN, private subnet, Service
+Gateway, DB system, and DBM private endpoint in the ignored regional workdir.
+The OPSI private endpoint was created through `prepare-prereqs --apply` and
+persisted into the ignored local config.
+
+Remaining enablement handoff for Chicago:
+
+- Store the monitoring-user password in a regional Vault secret and set
+  `password_secret_id` in `dbman-opsi.cap-chicago.local.yaml`.
+- Run the generated DB-side scripts from `generated/db-scripts-chicago/` through
+  a secure DB access path so `DBSNMP` has basic monitoring, advanced diagnostics,
+  and Performance Hub grants.
+- Re-run `configure --apply` and then `validate`; expected first post-provision
+  state before those steps is DBM `NOT_ENABLED`.
+
 ## Final verified state (API)
 
 - DBM: CDB `DBMOPSI` **UP**, PDB `PDB1` **UP** (ADVANCED).
@@ -333,14 +418,55 @@ Committed (redacted) screenshots in `docs/screenshots/`:
   Active Sessions + ASH Analytics (SQL-detail tables blurred — live SQL/service/users).
 - `console-06-data-safe-assessment.png` — Data Safe **Security Assessment**: Risk
   level + Risks by category + Top-5 security controls (aggregate charts only).
+- `console-07-capacity-planning.png` — Ops Insights **Database Capacity Planning**:
+  database inventory and CPU/storage/memory/I/O cards.
+- `console-08-capacity-trend-forecast.png` — single-resource trend and forecast
+  panel with forecast settings.
+- `console-09-capacity-aggregate.png` — capacity aggregate treemap and all-database
+  forecast trend.
+- `console-10-sql-insights-fleet-analysis.png` — SQL Insights fleet analysis; live
+  resource identifiers and SQL detail are redacted.
+- `console-11-sql-insights-database-analysis.png` — SQL Insights database analysis;
+  SQL IDs/modules/resource values are redacted.
+- `console-12-sql-explorer-multiregion.png` — SQL Explorer with the multi-region
+  selector showing Frankfurt + Chicago in one query flow.
+- `console-13-db-performance.png` — DB Performance dashboard with activity cards
+  and table-level identifiers redacted.
+- `console-14-opsi-fleet-administration.png` — Ops Insights fleet administration;
+  status/feature columns are visible while resource names and compartment values
+  are redacted.
 
 The Managed Databases (`console-01`) and fleet (`console-02`) views now show **both**
 DB systems — the original `DBMOPSI`/`PDB1` and the freshly-provisioned
 `dbmanops`/`dbmanops_pdb1` — all Enabled/Full.
 
+### CAP fleet rows needing attention
+
+The Console fleet-administration screenshot also showed three Autonomous Database
+rows in **Needs Attention**. A redacted API triage with the `cap` profile on
+2026-06-19 found:
+
+- Autonomous Database resource state: `AVAILABLE`.
+- Database Management resource state: `ENABLED`, with `ADVANCED` management.
+- Operations Insights resource flag: `ENABLED`; an explicit enable dry-run is
+  rejected by OCI as already enabled.
+- Data Safe resource flag: `REGISTERED`.
+- DBM preferred credential roles: `MONITORING`, `PC_READ`, and `PC_WRITE` exist
+  for each affected Autonomous Database.
+- OPSI `database-insights list` returns the VM CDB/PDB records as
+  `ACTIVE`/`SUCCESS`; ATP-S records are not returned by the list endpoint even
+  though the Autonomous DB resource-level OPSI flag is `ENABLED`.
+
+Do not repair this by cycling the databases. Treat it as an Autonomous Database
+OPSI collection-health/Console inventory issue: verify it from **Observability &
+Management > Collection issues** and, if the Console still reports the rows after
+the next collection interval, raise an OCI service request with the redacted API
+evidence above. The CLI path has no safe force-refresh verb for this state.
+
 Redaction: a DOM/text pass masks OCIDs, IPs, db_unique_name+domain, tenancy/account
 name and emails; for operator-pasted images, sensitive bands (header
-region/account/avatar, compartment chip) are Gaussian-blurred with PIL. Raw captures
+region/account/avatar, compartment chip), resource-name columns, SQL ID columns,
+and live SQL/service/module tables are blurred or covered with PIL. Raw captures
 go to `docs/screenshots/raw/` (gitignored) — only redacted images are committed.
 
 ### Capturing more Console views (CDP-attach recipe)

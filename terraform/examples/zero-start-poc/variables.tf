@@ -76,6 +76,12 @@ variable "policy_statements" {
   description = "IAM policy statements."
 }
 
+variable "create_identity_policy" {
+  type        = bool
+  description = "Create the IAM policy for DBM/OPSI enablement. Set false when an existing operator/group policy is managed outside this stack."
+  default     = true
+}
+
 variable "targets" {
   type = list(object({
     kind            = string

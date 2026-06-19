@@ -254,6 +254,38 @@ assesses their posture — Risk level, Risks by category, and Top-5 security con
 
 ![Data Safe security assessment](../screenshots/console-06-data-safe-assessment.png)
 
+**Ops Insights — Database Capacity Planning** (Lab 7). Capacity cards, forecast
+views, and aggregate treemaps show cross-fleet CPU, storage, memory, and I/O
+planning data:
+
+![Ops Insights capacity planning](../screenshots/console-07-capacity-planning.png)
+
+![Ops Insights capacity forecast](../screenshots/console-08-capacity-trend-forecast.png)
+
+![Ops Insights capacity aggregate](../screenshots/console-09-capacity-aggregate.png)
+
+**Ops Insights — SQL and performance diagnostics** (Lab 7). SQL Insights and DB
+Performance show fleet/database drilldowns with live SQL identifiers and resource
+names redacted:
+
+![SQL Insights fleet analysis](../screenshots/console-10-sql-insights-fleet-analysis.png)
+
+![SQL Insights database analysis](../screenshots/console-11-sql-insights-database-analysis.png)
+
+![Database performance](../screenshots/console-13-db-performance.png)
+
+**Ops Insights — Multi-region Data Object Explorer** (Lab 7). The Explorer region
+selector includes both Frankfurt and Chicago and returns region-aware rows from
+one query:
+
+![SQL Explorer multi-region](../screenshots/console-12-sql-explorer-multiregion.png)
+
+**Ops Insights — fleet administration** (Lab 7). The administration table shows
+enabled feature sets and which rows need remediation, with resource names and
+compartment values redacted:
+
+![Ops Insights fleet administration](../screenshots/console-14-opsi-fleet-administration.png)
+
 `discover --json` corroborates the Console: each enabled DB reports
 `dbm_status: ENABLED`, `opsi_status: ENABLED`, and `data_safe_status: ENABLED`.
 

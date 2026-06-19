@@ -14,6 +14,7 @@ def test_render_tfvars_includes_network_policy_and_targets() -> None:
     tfvars = render_tfvars(config)
 
     assert tfvars["create_test_network"] is True
+    assert tfvars["config_file_profile"] == "DEFAULT"
     assert tfvars["targets"] == [{"kind": "dbcs", "name": "db1", "resource_id": None, "provision": True, "management_type": "ADVANCED"}]
     assert "policy_statements" in tfvars
 
