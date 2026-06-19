@@ -30,6 +30,7 @@ from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.opsi_payloads import generate_opsi_payloads
 from dbman_opsi.orchestrator import ConfigureReport, ConfigureService
 from dbman_opsi.preflight import PreflightService
+from dbman_opsi.process_insights import ProcessInsightsService, format_process_insights_report
 from dbman_opsi.prerequisites import PrerequisiteService
 from dbman_opsi.regional_provisioning import (
     CHICAGO_REGION,
@@ -131,6 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = add_parser("validate", help="Validate registrations and collection readiness")
     _add_config_args(validate)
+
+    process_insights = add_parser(
+        "process-insights",
+        help="Diagnose Ops Insights Process Insights host/process telemetry",
+    )
+    process_insights.add_argument("--config", default="dbman-opsi.yaml")
+    process_insights.add_argument(
+        "--interval",
+        default="P7D",
+        help="ISO 8601 analysis interval for host/process summaries (default: P7D)",
+    )
+    process_insights.add_argument("--json", action="store_true", help="Emit the report as JSON")
 
     cross_region = add_parser(
         "cross-region",
@@ -457,6 +470,33 @@ def _cmd_validate(args: argparse.Namespace, ctx: _CliContext) -> int:
     return 0
 
 
+def _cmd_process_insights(args: argparse.Namespace, ctx: _CliContext) -> int:
+    config = load_config(args.config)
+
+    def oci_for_region(region: str) -> OciCli:
+        return OciCli(
+            config.profile,
+            region,
+            _make_runner(
+                dry_run=False,
+                run_id=ctx.run_id,
+                profile=config.profile,
+                region=region,
+                verbose=ctx.verbose,
+            ),
+        )
+
+    report = ProcessInsightsService(
+        _config_oci(config, ctx, dry_run=False),
+        oci_for_region=oci_for_region,
+    ).diagnose(config, interval=args.interval)
+    if args.json:
+        print(json.dumps(redact_data(report.to_dict()), indent=2, sort_keys=True))
+    else:
+        print(format_process_insights_report(report))
+    return 0 if report.ok else 1
+
+
 def _cmd_cross_region(args: argparse.Namespace, ctx: _CliContext) -> int:
     config = load_config(args.config)
     if args.regions:
@@ -690,6 +730,7 @@ def _command_handlers():
         "enable": _cmd_enable,
         "prepare-prereqs": _cmd_prepare_prereqs,
         "validate": _cmd_validate,
+        "process-insights": _cmd_process_insights,
         "cross-region": _cmd_cross_region,
         "set-credentials": _cmd_set_credentials,
         "discover": _cmd_discover,

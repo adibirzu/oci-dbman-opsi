@@ -258,6 +258,18 @@ assesses their posture — Risk level, Risks by category, and Top-5 security con
 views, and aggregate treemaps show cross-fleet CPU, storage, memory, and I/O
 planning data:
 
+If **Process Insights** shows host inventory but no process rows, verify the
+collector path before troubleshooting the Console:
+
+```bash
+dbman-opsi process-insights --config dbman-opsi.local.yaml --interval P7D
+```
+
+For PE co-managed database host insights, host resource summaries can exist
+while top-process rows are empty. Process rows require a MACS cloud-host or
+Management Agent-backed host insight collector; do not inject synthetic
+host-metric data for the lab.
+
 ![Ops Insights capacity planning](../screenshots/console-07-capacity-planning.png)
 
 ![Ops Insights capacity forecast](../screenshots/console-08-capacity-trend-forecast.png)
