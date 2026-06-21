@@ -236,7 +236,17 @@ class PreflightService:
         if target.kind in {"dbcs", "exadata"}:
             checks.append(self._pe_check("target.dbm_private_endpoint", target.private_endpoint_id, self.oci.get_db_management_private_endpoint))
             checks.append(self._pe_check("target.opsi_private_endpoint", target.opsi_private_endpoint_id, self.oci.get_opsi_private_endpoint))
+            checks.append(self._host_firewall_check(target))
         return tuple(checks)
+
+    def _host_firewall_check(self, target: Target) -> CheckResult:
+        return manual(
+            "target.host_firewall",
+            "Host OS firewall must allow Oracle listener TCP ports 1521/1522 from the DBM/OPSI/Data Safe source CIDR",
+            "Run the generated <target>/00-check-host-firewall.sh on each DBCS/Exadata DB node. "
+            "Use `DBMAN_OPSI_SOURCE_CIDR=<monitoring-source-cidr> ./00-check-host-firewall.sh --apply` "
+            "to add firewalld/iptables rules.",
+        )
 
     def _parent_cdb_check(self, target: Target) -> CheckResult:
         name = "target.parent_cdb"

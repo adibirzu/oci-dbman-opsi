@@ -132,6 +132,8 @@ def test_healthy_native_target_passes_all_gates() -> None:
     checks = _checks_by_name(target.checks)
     assert checks["target.resource"].status == "pass"
     assert checks["target.monitoring_user"].status == "manual"
+    assert checks["target.host_firewall"].status == "manual"
+    assert "1521/1522" in checks["target.host_firewall"].detail
 
 
 def test_missing_service_gateway_blocks() -> None:

@@ -86,6 +86,13 @@ Pillars: {', '.join(target.services)}
 
 ## 1. Database-side steps (run as the DBA / SYSDBA)
 
+Before running the SQL scripts, verify the host OS firewall on each DB node:
+
+```bash
+./00-check-host-firewall.sh
+DBMAN_OPSI_SOURCE_CIDR=<monitoring-source-cidr> ./00-check-host-firewall.sh --apply
+```
+
 Execute these scripts in order with SQLcl or SQL*Plus. They prompt for the
 monitoring password interactively and never store it in a file:
 
