@@ -106,6 +106,23 @@ Generate database SQL scripts:
 dbman-opsi generate-db-scripts --config dbman-opsi.local.yaml --output generated/db-scripts
 ```
 
+Each DBCS/Exadata packet includes a host OS firewall check. Run it on each DB
+node before the SQL scripts:
+
+```bash
+cd generated/db-scripts/<target>
+./00-check-host-firewall.sh
+DBMAN_OPSI_SOURCE_CIDR=<monitoring-source-cidr> ./00-check-host-firewall.sh --apply
+```
+
+The script supports `firewalld` and `iptables`. It checks and allows TCP
+`1521`/`1522`, which are the Oracle listener ports used by this PoC for Database
+Management, Ops Insights, and Data Safe private endpoint connectivity. Keep
+`DBMAN_OPSI_SOURCE_CIDR` restricted to the private endpoint subnet, DB subnet, or
+approved operator/Bastion CIDR; do not open listener ports broadly in production.
+Set `DBMAN_OPSI_DB_PORTS="1521 1522 2484"` if the target uses TCPS/custom
+listener ports.
+
 Run the scripts on DBCS or Exadata with SQLcl or SQL*Plus as an administrative
 user, in this order (validate runs last so it confirms the grants):
 

@@ -5,6 +5,7 @@ from dbman_opsi.db_scripts import (
     advanced_grants_sql,
     data_safe_privileges_sql,
     generate_db_scripts,
+    host_firewall_script,
     monitoring_user_sql,
     performance_hub_sql,
     validation_sql,
@@ -74,6 +75,32 @@ def test_generate_db_scripts_includes_performance_hub_script(tmp_path: Path) -> 
     )
     paths = generate_db_scripts(config, tmp_path)
     assert any(p.name == "05-enable-performance-hub.sql" for p in paths)
+
+
+def test_host_firewall_script_checks_and_prints_listener_port_commands() -> None:
+    script = host_firewall_script(Target(kind="dbcs", name="db1"))
+
+    assert "DBMAN_OPSI_SOURCE_CIDR" in script
+    assert "--add-port=\"${port}/tcp\"" in script
+    assert "--add-rich-rule" in script
+    assert "iptables -I INPUT" in script
+    assert "1521 1522" in script
+
+
+def test_generate_db_scripts_includes_executable_host_firewall_script(tmp_path: Path) -> None:
+    config = EnablementConfig(
+        profile="DEFAULT",
+        region="eu-frankfurt-1",
+        targets=(Target(kind="exadata", name="exa"),),
+    )
+
+    paths = generate_db_scripts(config, tmp_path)
+    firewall = tmp_path / "exa" / "00-check-host-firewall.sh"
+
+    assert firewall in paths
+    assert firewall.exists()
+    assert firewall.stat().st_mode & 0o111
+    assert "00-check-host-firewall.sh" in (tmp_path / "exa" / "README.md").read_text()
 
 
 def test_validation_sql_checks_performance_hub_privileges() -> None:

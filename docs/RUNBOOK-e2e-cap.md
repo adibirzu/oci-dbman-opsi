@@ -63,6 +63,22 @@ SQL
 sqlplus -L DBSNMP/<pw>@<db-ip>:1521/<real-service>
 ```
 
+On the DB host as `opc` or another sudo-capable OS user, verify the host firewall
+before enabling DBM/OPSI/Data Safe:
+
+```bash
+cd generated/db-scripts/<target>
+./00-check-host-firewall.sh
+DBMAN_OPSI_SOURCE_CIDR=<monitoring-source-cidr> ./00-check-host-firewall.sh --apply
+```
+
+The generated script checks `firewalld` first and falls back to `iptables`. It
+prints commands by default and only applies when passed `--apply`. Required
+listener ports for this PoC are TCP `1521`/`1522`; keep the source CIDR scoped to
+the DBM/OPSI/Data Safe private endpoint subnet, DB subnet, or approved
+operator/Bastion CIDR. Set `DBMAN_OPSI_DB_PORTS="1521 1522 2484"` for TCPS or
+custom listener ports.
+
 ## Phase 3 — generators (idempotent)
 
 ```bash

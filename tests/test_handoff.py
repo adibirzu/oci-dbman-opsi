@@ -22,6 +22,7 @@ def test_handoff_includes_enable_command_for_ready_cloud_target() -> None:
 
     assert "enable-database-management" in text
     assert "--database-id db-id" in text
+    assert "00-check-host-firewall.sh" in text
     assert "NOTE: still missing" not in text
 
 
@@ -46,6 +47,7 @@ def test_generate_handoff_writes_scripts_and_doc(tmp_path: Path) -> None:
     paths = generate_handoff(_config(target), tmp_path)
 
     assert (tmp_path / "cloud-db" / "HANDOFF.md").exists()
+    assert (tmp_path / "cloud-db" / "00-check-host-firewall.sh").exists()
     assert (tmp_path / "cloud-db" / "01-create-monitoring-user.sql").exists()
     assert any(path.name == "HANDOFF.md" for path in paths)
 
