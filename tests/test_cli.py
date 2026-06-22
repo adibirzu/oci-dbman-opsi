@@ -272,6 +272,24 @@ def test_cli_generate_opsi_payloads(tmp_path: Path) -> None:
     assert (output_dir / "cloud-db" / "credential-details.json").exists()
 
 
+def test_cli_generate_opsi_diagnostics(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "opsi-diagnostics"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", resource_id=DATABASE_ID),),
+        ),
+    )
+
+    assert main(["generate-opsi-diagnostics", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "cloud-db" / "00-oci-control-plane-diagnostics.sh").exists()
+    assert (output_dir / "cloud-db" / "02-test-opsi-login.sql").exists()
+
+
 def test_cli_cross_region_updates_config_and_prints_poc_steps(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.yaml"
     save_config(

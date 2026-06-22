@@ -63,6 +63,7 @@ dbman-opsi provision --config dbman-opsi.local.yaml --render-only
 dbman-opsi prepare-prereqs --config dbman-opsi.local.yaml --dry-run
 dbman-opsi generate-db-scripts --config dbman-opsi.local.yaml --output generated/db-scripts
 dbman-opsi generate-opsi-payloads --config dbman-opsi.local.yaml --output generated/opsi-payloads
+dbman-opsi generate-opsi-diagnostics --config dbman-opsi.local.yaml --output generated/opsi-diagnostics
 dbman-opsi db-exec --config dbman-opsi.local.yaml            # generate DB scripts + show hybrid run plan
 dbman-opsi preflight --config dbman-opsi.local.yaml
 dbman-opsi configure --config dbman-opsi.local.yaml          # plan: detect + gate, no changes (DBM+OPSI)
@@ -135,6 +136,7 @@ For your public fork, update the button URL to your repository archive URL.
 - `generate-db-scripts`: create database-side SQL scripts for DBCS, Exadata, and external database targets. Each target packet includes `00-check-host-firewall.sh`, which checks the DB server OS firewall and prints/applies `firewall-cmd` or `iptables` rules for Oracle listener ports.
 - `generate-agent-scripts`: create Management Agent bootstrap scripts for external targets.
 - `generate-opsi-payloads`: create Operations Insights JSON payload templates.
+- `generate-opsi-diagnostics`: create a per-target read-only diagnostic packet for failed DBCS/Exadata OPSI enablement. It includes an OCI CLI shell script for DBM/OPSI private endpoints, Vault secret state, IAM service-principal policy text, failed OPSI insight/work-request evidence, and SQL scripts that verify DB service routing, monitoring-user grants, and the actual monitoring login using the Vault password.
 - `cross-region`: configure and summarize the Ops Insights multi-region POC selection. It writes `monitoring_regions` when `--regions` is supplied, groups OPSI targets by their configured region, and prints the Console checklist for Data Object Explorer plus the Configuration and Capacity dashboards.
 - `preflight`: read-only check of every prerequisite (IAM, Service Gateway, route, subnet security rules, host firewall handoff, private endpoints, Vault secret, monitoring user, Management Agent). Supports `--json` and `--db-check-file` (spooled `04-validate-monitoring-user.sql` output) to verify the DB monitoring user instead of leaving it manual.
 - `configure`: orchestrated detect → branch-by-location → gate → act flow. `--apply` enables DBM/OPSI and then sets the advanced-diagnostics/administration preferred credentials via a Vault named credential; `--skip-credentials` opts out. `--db-side-only` emits DBA handoff packets, `--force` overrides blockers, `--json` supports automation. Add `--with-data-safe` to also register Data Safe targets for `datasafe`-opted targets in the same `--apply` pass (all three pillars in one command; `--data-safe-user`/`--data-safe-password-env` supply credentials).
