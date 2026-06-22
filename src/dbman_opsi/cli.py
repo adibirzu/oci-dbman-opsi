@@ -27,6 +27,7 @@ from dbman_opsi.enablement import EnablementService
 from dbman_opsi.envfile import load_env_file
 from dbman_opsi.journal import RunJournal, summarize
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.opsi_diagnostics import generate_opsi_diagnostics
 from dbman_opsi.opsi_payloads import generate_opsi_payloads
 from dbman_opsi.orchestrator import ConfigureReport, ConfigureService
 from dbman_opsi.preflight import PreflightService
@@ -197,6 +198,13 @@ def build_parser() -> argparse.ArgumentParser:
     opsi_payloads = add_parser("generate-opsi-payloads", help="Generate Operations Insights JSON payload files")
     opsi_payloads.add_argument("--config", default="dbman-opsi.yaml")
     opsi_payloads.add_argument("--output", default="generated/opsi-payloads")
+
+    opsi_diagnostics = add_parser(
+        "generate-opsi-diagnostics",
+        help="Generate read-only OCI/SQL scripts for failed DBCS/Exadata Ops Insights enablement",
+    )
+    opsi_diagnostics.add_argument("--config", default="dbman-opsi.yaml")
+    opsi_diagnostics.add_argument("--output", default="generated/opsi-diagnostics")
 
     set_creds = add_parser(
         "set-credentials",
@@ -673,6 +681,15 @@ def _cmd_generate_opsi_payloads(args: argparse.Namespace, ctx: _CliContext) -> i
     return 0
 
 
+def _cmd_generate_opsi_diagnostics(args: argparse.Namespace, ctx: _CliContext) -> int:
+    paths = generate_opsi_diagnostics(load_config(args.config), Path(args.output))
+    for path in paths:
+        print(path)
+    if not paths:
+        print("No DBCS/Exadata OPSI targets found in config.")
+    return 0
+
+
 def _db_exec_apply_decisions(args: argparse.Namespace, config: EnablementConfig):
     if not (args.bastion_id and args.target_ip and args.ssh_key):
         raise SystemExit("db-exec --apply requires --bastion-id, --target-ip, and --ssh-key")
@@ -740,6 +757,7 @@ def _command_handlers():
         "generate-agent-scripts": _cmd_generate_agent_scripts,
         "generate-db-scripts": _cmd_generate_db_scripts,
         "generate-opsi-payloads": _cmd_generate_opsi_payloads,
+        "generate-opsi-diagnostics": _cmd_generate_opsi_diagnostics,
         "db-exec": _cmd_db_exec,
         "data-safe": _cmd_data_safe,
     }
