@@ -39,10 +39,20 @@ def test_oci_control_plane_script_checks_failed_opsi_and_work_requests() -> None
 
     assert "database-management managed-database get" in script
     assert "opsi-insights-FAILED" in script
-    assert "opsi work-request list" in script
+    assert "opsi work-requests list" in script
     assert "service dpd" in script
     assert "service operations-insights" in script
     assert "vault secret get" in script
+    assert 'REQUESTED_OCI_AUTH="${DBMAN_OPSI_OCI_AUTH:-}"' in script
+    assert '--auth "$REQUESTED_OCI_AUTH"' in script
+    assert "fetch_subnet_security" in script
+    assert "subnet-route-table" in script
+    assert "subnet-security-list-${index}" in script
+    assert "fetch_endpoint_nsgs" in script
+    assert "network nsg get --nsg-id" in script
+    assert "fetch_opsi_work_request_details" in script
+    assert "opsi work-requests list" in script
+    assert "opsi work-requests get" in script
     assert "No mutating OCI commands" in script
 
 

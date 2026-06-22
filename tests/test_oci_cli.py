@@ -26,6 +26,17 @@ def test_oci_cli_adds_profile_region_and_json_output() -> None:
     assert runner.retry_flags == [True]
 
 
+def test_oci_cli_can_use_instance_principal_auth(monkeypatch) -> None:
+    runner = FakeRunner('{"data": [{"id": "vcn-id"}]}')
+    monkeypatch.setenv("DBMAN_OPSI_OCI_AUTH", "instance_principal")
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    oci.list_vcns("compartment-id")
+
+    assert runner.commands[0][:5] == ["oci", "--region", "eu-frankfurt-1", "--auth", "instance_principal"]
+    assert "--profile" not in runner.commands[0]
+
+
 def test_oci_cli_reads_profile_tenancy_from_config(tmp_path, monkeypatch) -> None:
     config = tmp_path / "oci-config"
     config.write_text("[cap]\ntenancy = tenancy-id\n", encoding="utf-8")

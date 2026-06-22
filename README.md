@@ -118,6 +118,134 @@ dbman-opsi doctor
 
 Then run the workshop with `--profile DEFAULT` and your selected region.
 
+### Customer-tenancy OPSI diagnostics
+
+Use this flow when a customer says DBCS has the OCI-side prerequisites enabled
+but Operations Insights still fails and the Console/work-request detail is not
+enough. The goal is to capture the whole read-only evidence chain: IAM policy
+visibility, DBM/OPSI private endpoint state, subnet route/security controls,
+Vault secret state, OPSI failed insight/work-request details, and the DB-side
+service/user checks.
+
+Cloud Shell uses the signed-in user's OCI CLI session/profile. From Cloud Shell:
+
+```bash
+git clone https://github.com/adibirzu/oci-dbman-opsi.git
+cd oci-dbman-opsi
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+
+dbman-opsi doctor --profile DEFAULT --region <region>
+dbman-opsi discover --profile DEFAULT --region <region> --compartment <customer_compartment_ocid> --subtree
+dbman-opsi plan --profile DEFAULT --region <region> --output dbman-opsi.customer.local.yaml
+dbman-opsi preflight --config dbman-opsi.customer.local.yaml --json > preflight.json
+dbman-opsi generate-opsi-diagnostics --config dbman-opsi.customer.local.yaml --output generated/opsi-diagnostics
+```
+
+For a customer-tenancy diagnostic host that must use instance principals, run the
+same commands after exporting the auth mode. The instance must be in a dynamic
+group with enough read visibility for the affected compartments:
+
+```bash
+export DBMAN_OPSI_OCI_AUTH=instance_principal
+export OCI_CLI_REGION=<region>
+
+dbman-opsi doctor --profile DEFAULT --region <region>
+dbman-opsi discover --profile DEFAULT --region <region> --compartment <customer_compartment_ocid> --subtree
+dbman-opsi plan --profile DEFAULT --region <region> --output dbman-opsi.customer.local.yaml
+dbman-opsi preflight --config dbman-opsi.customer.local.yaml --json > preflight.json
+dbman-opsi generate-opsi-diagnostics --config dbman-opsi.customer.local.yaml --output generated/opsi-diagnostics
+```
+
+Minimum diagnostic IAM for the operator principal is read-only. A typical
+customer policy for the diagnostic dynamic group is:
+
+```text
+Allow dynamic-group <diagnostic_dynamic_group> to inspect compartments in tenancy
+Allow dynamic-group <diagnostic_dynamic_group> to read all-resources in compartment <target_compartment>
+```
+
+If the database, Vault, private endpoints, VCN/subnet, or IAM policies live in
+different compartments, grant equivalent read visibility there too. For
+production tenants, prefer narrower service families after the first evidence
+capture; the broad read policy is meant to remove blind spots during triage.
+
+Run each generated target packet:
+
+```bash
+cd generated/opsi-diagnostics/<target-name>
+
+# Cloud Shell / profile auth:
+./00-oci-control-plane-diagnostics.sh ./out
+
+# Instance-principal auth:
+DBMAN_OPSI_OCI_AUTH=instance_principal ./00-oci-control-plane-diagnostics.sh ./out
+```
+
+The OCI-side script is read-only. When `jq` is available it expands the private
+network path by reading the subnet route table, subnet security lists, and DBM /
+OPSI private endpoint NSGs. It also pulls OPSI work-request detail records for
+failed or database-insight work requests. The private endpoint is a
+service-managed resource, so you cannot SSH "from" it; use these control-plane
+objects plus `managed-database.json` (`database-status` should be `UP`) to prove
+whether DBM/OPSI can reach the database over the private endpoint path.
+
+Run the DB-side checks with the DBA:
+
+```sql
+sqlplus / as sysdba
+spool opsi-db-readiness.log
+@01-diagnose-opsi-db-readiness.sql
+spool off
+exit
+
+sqlplus /nolog
+spool opsi-login-probe.log
+@02-test-opsi-login.sql
+spool off
+exit
+```
+
+The second script must use the same monitoring user, service name, and Vault
+password that DBM/OPSI use. It catches the common hidden causes: stale Vault
+password, locked/expired monitoring account, missing dictionary grants, and a
+PDB service name that does not route to the expected container.
+
+Send the customer/OCI owner these files from the packet:
+
+- `preflight.json`
+- `out/database-resource.json`
+- `out/managed-database.json`
+- `out/dbm-private-endpoint.json`
+- `out/opsi-private-endpoint.json`
+- `out/vault-secret.json`
+- `out/iam-policies.json`
+- `out/subnet.json`, `out/subnet-route-table.json`, `out/subnet-security-list-*.json`
+- `out/*-nsg-*.json`
+- `out/opsi-insights-FAILED.json`, `out/opsi-work-requests.json`, `out/opsi-work-request-*-detail.json`
+- `opsi-db-readiness.log`
+- `opsi-login-probe.log`
+
+Policy symptoms to look for:
+
+- `iam-policies.json` does not mention `service dpd`: Database Management may
+  not be allowed to read/use the Vault secret or related key.
+- `iam-policies.json` does not mention `service operations-insights`: Operations
+  Insights may not be allowed to read/use the Vault secret or private endpoint
+  path.
+- The diagnostic principal cannot read network, Vault, Database Management, or
+  OPSI objects: add read visibility for the diagnostic dynamic group/user before
+  concluding the resource is missing.
+
+After fixing the failing signal, rerun:
+
+```bash
+dbman-opsi preflight --config dbman-opsi.customer.local.yaml --db-check-file generated/opsi-diagnostics/<target-name>/opsi-db-readiness.log
+dbman-opsi enable --config dbman-opsi.customer.local.yaml --apply --force-reconcile
+dbman-opsi validate --config dbman-opsi.customer.local.yaml
+```
+
 ## Resource Manager
 
 The Deploy to Oracle Cloud button launches the Terraform stack under `terraform/examples/zero-start-poc`. Resource Manager provisions OCI-side prerequisites such as IAM, workshop networking, and service private endpoints. Database credentials and database-side scripts are handled by the CLI workflow so secrets are not placed in Terraform variables.

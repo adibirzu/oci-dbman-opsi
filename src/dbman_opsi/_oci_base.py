@@ -69,6 +69,9 @@ class _OciBase:
         return dict(payload) if isinstance(payload, dict) else {}
 
     def _base_args(self) -> list[str]:
+        auth = os.environ.get("DBMAN_OPSI_OCI_AUTH") or os.environ.get("OCI_AUTH")
+        if auth:
+            return ["oci", "--region", self.region, "--auth", auth]
         return ["oci", "--profile", self.profile, "--region", self.region]
 
     def profile_tenancy(self) -> str | None:

@@ -39,6 +39,10 @@ set -u
 
 PROFILE='{_sh_value(config.profile)}'
 REGION='{_sh_value(target.region or config.region)}'
+REQUESTED_OCI_AUTH="${{DBMAN_OPSI_OCI_AUTH:-}}"
+if [ -z "$REQUESTED_OCI_AUTH" ]; then
+  REQUESTED_OCI_AUTH="${{OCI_AUTH:-}}"
+fi
 TENANCY_OR_COMPARTMENT='{_sh_value(config.tenancy_id or config.compartment_id)}'
 COMPARTMENT_ID='{_sh_value(target.compartment_id or config.compartment_id)}'
 DATABASE_ID='{_sh_value(target.resource_id)}'
@@ -54,7 +58,11 @@ SERVICE_NAME='{_sh_value(target.service_name)}'
 OUT_DIR="${{1:-opsi-diagnostics-{_slug(target.name)}}}"
 mkdir -p "$OUT_DIR"
 
-OCI=(oci --profile "$PROFILE" --region "$REGION")
+if [ -n "$REQUESTED_OCI_AUTH" ]; then
+  OCI=(oci --region "$REGION" --auth "$REQUESTED_OCI_AUTH")
+else
+  OCI=(oci --profile "$PROFILE" --region "$REGION")
+fi
 
 run_json() {{
   local label="$1"
@@ -81,9 +89,66 @@ require_value() {{
   return 0
 }}
 
+json_value() {{
+  local file="$1"
+  local expression="$2"
+  if command -v jq >/dev/null 2>&1 && [ -s "$file" ]; then
+    jq -r "$expression // empty" "$file" 2>/dev/null
+  fi
+}}
+
+fetch_subnet_security() {{
+  if ! command -v jq >/dev/null 2>&1 || [ ! -s "$OUT_DIR/subnet.json" ]; then
+    echo "INFO: jq not available or subnet.json missing; skipping route/security-list expansion."
+    return 0
+  fi
+  local route_table_id
+  route_table_id="$(json_value "$OUT_DIR/subnet.json" '.data."route-table-id"')"
+  if [ -n "$route_table_id" ]; then
+    run_json "subnet-route-table" network route-table get --rt-id "$route_table_id"
+  fi
+  local index=0
+  jq -r '.data."security-list-ids"[]? // empty' "$OUT_DIR/subnet.json" | while IFS= read -r security_list_id; do
+    if [ -n "$security_list_id" ]; then
+      index=$((index + 1))
+      run_json "subnet-security-list-${{index}}" network security-list get --security-list-id "$security_list_id"
+    fi
+  done
+}}
+
+fetch_endpoint_nsgs() {{
+  local label="$1"
+  local file="$OUT_DIR/${{label}}.json"
+  if ! command -v jq >/dev/null 2>&1 || [ ! -s "$file" ]; then
+    echo "INFO: jq not available or ${{label}}.json missing; skipping ${{label}} NSG expansion."
+    return 0
+  fi
+  local index=0
+  jq -r '.data."nsg-ids"[]? // empty' "$file" | while IFS= read -r nsg_id; do
+    if [ -n "$nsg_id" ]; then
+      index=$((index + 1))
+      run_json "${{label}}-nsg-${{index}}" network nsg get --nsg-id "$nsg_id"
+    fi
+  done
+}}
+
+fetch_opsi_work_request_details() {{
+  if ! command -v jq >/dev/null 2>&1 || [ ! -s "$OUT_DIR/opsi-work-requests.json" ]; then
+    echo "INFO: jq not available or opsi-work-requests.json missing; skipping work-request detail expansion."
+    return 0
+  fi
+  jq -r '.data[]? | select((."operation-type" | tostring | test("DATABASE_INSIGHT|CREATE"; "i")) or (."status" | tostring | test("FAILED|CANCELED"; "i"))) | .id // empty' "$OUT_DIR/opsi-work-requests.json" | while IFS= read -r work_request_id; do
+    if [ -n "$work_request_id" ]; then
+      safe_id="$(printf '%s' "$work_request_id" | tr -c '[:alnum:]' '-')"
+      run_json "opsi-work-request-${{safe_id}}-detail" opsi work-requests get --work-request-id "$work_request_id"
+    fi
+  done
+}}
+
 echo "Target: {target.name}"
 echo "Region: $REGION"
 echo "Service: $SERVICE_NAME"
+echo "Auth mode: ${{REQUESTED_OCI_AUTH:-profile $PROFILE}}"
 echo
 
 require_value "COMPARTMENT_ID" "$COMPARTMENT_ID"
@@ -126,7 +191,8 @@ if [ -n "$COMPARTMENT_ID" ]; then
       --lifecycle-state "$state" \\
       --all
   done
-  run_json "opsi-work-requests" opsi work-request list --compartment-id "$COMPARTMENT_ID" --all
+  run_json "opsi-work-requests" opsi work-requests list --compartment-id "$COMPARTMENT_ID" --all
+  fetch_opsi_work_request_details
 fi
 
 if [ -n "$TENANCY_OR_COMPARTMENT" ]; then
@@ -147,11 +213,15 @@ fi
 
 if [ -n "$SUBNET_ID" ]; then
   run_json "subnet" network subnet get --subnet-id "$SUBNET_ID"
+  fetch_subnet_security
 fi
 
 if [ -n "$VCN_ID" ] && [ -n "$COMPARTMENT_ID" ]; then
   run_json "service-gateways" network service-gateway list --compartment-id "$COMPARTMENT_ID" --vcn-id "$VCN_ID" --all
 fi
+
+fetch_endpoint_nsgs "dbm-private-endpoint"
+fetch_endpoint_nsgs "opsi-private-endpoint"
 
 cat >"$OUT_DIR/README-next-steps.txt" <<'EOF'
 Review checklist:
@@ -160,7 +230,8 @@ Review checklist:
 3. dbm-private-endpoint.json and opsi-private-endpoint.json: lifecycle-state should be ACTIVE.
 4. vault-secret.json: lifecycle-state should be ACTIVE. IAM policies must allow service dpd and service operations-insights to use/read the secret/key.
 5. opsi-insights-FAILED.json and opsi-work-requests.json: look for CREATE_DATABASE_INSIGHT failures and DbcsEntityChangeWorkflowFailed details.
-6. Run 01-diagnose-opsi-db-readiness.sql as SYSDBA, then 02-test-opsi-login.sql with the same credentials stored in Vault.
+6. subnet-route-table.json, subnet-security-list-*.json, and *-nsg-*.json show whether the subnet/endpoint security path allows listener TCP 1521/1522.
+7. Run 01-diagnose-opsi-db-readiness.sql as SYSDBA, then 02-test-opsi-login.sql with the same credentials stored in Vault.
 EOF
 
 echo
