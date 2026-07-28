@@ -2,7 +2,7 @@
 
 [![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/main.zip)
 
-`dbman-opsi` is a public-repo-ready workshop toolkit for enabling four OCI
+`dbman-opsi` is an OCI enablement and lifecycle tool for four
 observability/security pillars — **Database Management (DBM)**, **Operations
 Insights (OPSI)**, **Data Safe**, and **Log Analytics** — across:
 
@@ -18,10 +18,12 @@ workstation, OCI Resource Manager, or any automation runner that has OCI CLI and
 Terraform access. Every tenant-specific value is supplied through variables,
 ignored local config files, OCI Vault, or environment variables.
 
-> Demo/PoC only: this is **not an official Oracle product** and is not an
-> Oracle-supported deployment tool. It is intended for customer-approved,
-> disposable demonstrations and proof of concepts. See the full
-> [Demo and PoC Use Notice](docs/demo-poc-notice.md).
+It supports two operating paths: expert per-target enablement and a production
+fleet lifecycle with read-only discovery, exact-plan approval, checkpointed
+resume, signed DBA/host handoffs, protected state, collection-proof gates, and
+ownership-safe offboarding. This is **not an official Oracle product** or an
+Oracle-supported deployment tool. Production use still requires owner-approved
+access and change control; current live acceptance evidence is owner-gated.
 
 ## Architecture
 
@@ -34,13 +36,15 @@ The versioned scope, ownership, dependencies, and release gates for the
 disposable DBCS/ADB demonstration are in the
 [product portfolio](docs/product/portfolio.md).
 
-For whole-tenancy fleet planning, plan-gated onboarding/resume/offboarding, and
-the unclosed scratch-tenancy acceptance matrix, use the
-[fleet lifecycle runbook](docs/fleet-lifecycle-runbook.md). This is an operator
-contract, not a claim of live OCI validation.
+For installation, configuration, production options, fleet lifecycle commands,
+state/evidence handling, and release gates, start with the
+[production operations guide](docs/production-operations-guide.md). For the
+full lifecycle contract and unclosed scratch-tenancy acceptance matrix, use the
+[fleet lifecycle runbook](docs/fleet-lifecycle-runbook.md).
 
-For the wiki-style operator guide with capability deep dives and a step-by-step
-lab, see [docs/wiki-oci-db-observability-lab.md](docs/wiki-oci-db-observability-lab.md).
+The repository Wiki mirrors the production guide as page-oriented operator
+documentation. The in-repository wiki source is
+[docs/wiki-oci-db-observability-lab.md](docs/wiki-oci-db-observability-lab.md).
 
 ## Workshop
 
