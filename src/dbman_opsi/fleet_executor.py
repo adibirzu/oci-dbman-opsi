@@ -140,7 +140,11 @@ class FleetOnboardingExecutor:
         self._lease_heartbeat: LeaseHeartbeat | None = None
 
     def execute(
-        self, *, approved_plan_id: str, run_id: str | None = None
+        self,
+        *,
+        approved_plan_id: str,
+        run_id: str | None = None,
+        retry_failed: bool = False,
     ) -> RunManifest:
         """Run or resume a plan; approval is checked before reading/writing a run."""
         self.plan.require_approval(approved_plan_id)
@@ -150,9 +154,10 @@ class FleetOnboardingExecutor:
             raise ValueError("run is bound to a different fleet plan")
         if existing is not None:
             existing = refresh_collection_readiness(existing)
-        # A previously terminal manifest is a deterministic no-op. In particular,
-        # never turn a blocked or failed target into a new failed/degraded state
-        # merely because an operator asked to resume it.
+            if retry_failed:
+                existing = existing.reopen_failed()
+        # A previously terminal manifest is a deterministic no-op unless the
+        # operator explicitly requests an exact-plan-bound failed-phase retry.
         if existing is not None and not any(
             self._target_is_resumable(target) for target in existing.targets
         ):

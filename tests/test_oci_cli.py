@@ -107,7 +107,7 @@ def _database_page_query(command: list[str]) -> dict[str, list[str]]:
     return parse_qs(target.query)
 
 
-def test_oci_cli_database_db_system_route_follows_all_pages_with_stable_deduplication() -> None:
+def test_oci_cli_database_db_home_route_follows_all_pages_with_stable_deduplication() -> None:
     # Break caught: returning only the first page omits database-c from discovery.
     runner = _PagedDatabaseRunner([
         '{"data": [{"id": "database-b"}, {"id": "database-a"}], "headers": {"opc-next-page": "page-2"}}',
@@ -115,17 +115,17 @@ def test_oci_cli_database_db_system_route_follows_all_pages_with_stable_deduplic
     ])
     oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
 
-    databases = oci.list_databases("compartment-id", "db-system-id")
+    databases = oci.list_databases_for_db_home("compartment-id", "db-home-id")
 
     assert [database["id"] for database in databases] == ["database-b", "database-a", "database-c"]
     assert len(runner.commands) == 2
     assert _database_page_query(runner.commands[0]) == {
         "compartmentId": ["compartment-id"],
-        "dbSystemId": ["db-system-id"],
+        "dbHomeId": ["db-home-id"],
     }
     assert _database_page_query(runner.commands[1]) == {
         "compartmentId": ["compartment-id"],
-        "dbSystemId": ["db-system-id"],
+        "dbHomeId": ["db-home-id"],
         "page": ["page-2"],
     }
 
@@ -154,10 +154,9 @@ def test_oci_cli_db_home_topology_and_database_list_reject_invalid_parent_shapes
                 assert "--vm-cluster-id" not in args
                 payload = '{"data": [{"id": "home-a"}, {"id": "home-b"}]}'
             else:
-                assert _database_page_query(args) == {
-                    "compartmentId": ["compartment-id"],
-                    "dbSystemId": ["system-id"],
-                }
+                query = _database_page_query(args)
+                assert query["compartmentId"] == ["compartment-id"]
+                assert query["dbHomeId"][0] in {"home-a", "home-b"}
                 payload = '{"data": [{"id": "database-system"}], "headers": {}}'
             return CommandResult(tuple(args), payload, "", 0)
 
@@ -170,7 +169,7 @@ def test_oci_cli_db_home_topology_and_database_list_reject_invalid_parent_shapes
     assert "--all" in runner.commands[0]
 
 
-def test_oci_cli_database_vm_cluster_route_follows_all_pages_with_stable_deduplication() -> None:
+def test_oci_cli_database_home_route_handles_exadata_pages_with_stable_deduplication() -> None:
     # Break caught: returning only the first page omits exadata-database-c.
     runner = _PagedDatabaseRunner([
         '{"data": [{"id": "exadata-database-b"}, {"id": "exadata-database-a"}], "headers": {"OPC-Next-Page": "page-2"}}',
@@ -178,7 +177,7 @@ def test_oci_cli_database_vm_cluster_route_follows_all_pages_with_stable_dedupli
     ])
     oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
 
-    databases = oci.list_databases_for_vm_cluster("compartment-id", "vm-cluster-id")
+    databases = oci.list_databases_for_db_home("compartment-id", "exadata-home-id")
 
     assert [database["id"] for database in databases] == [
         "exadata-database-b", "exadata-database-a", "exadata-database-c"
@@ -186,12 +185,30 @@ def test_oci_cli_database_vm_cluster_route_follows_all_pages_with_stable_dedupli
     assert len(runner.commands) == 2
     assert _database_page_query(runner.commands[0]) == {
         "compartmentId": ["compartment-id"],
-        "vmClusterId": ["vm-cluster-id"],
+        "dbHomeId": ["exadata-home-id"],
     }
     assert _database_page_query(runner.commands[1]) == {
         "compartmentId": ["compartment-id"],
-        "vmClusterId": ["vm-cluster-id"],
+        "dbHomeId": ["exadata-home-id"],
         "page": ["page-2"],
+    }
+
+
+def test_oci_cli_vm_cluster_database_route_enumerates_db_homes() -> None:
+    runner = _PagedDatabaseRunner([
+        '{"data": [{"id": "exadata-home"}]}',
+        '{"data": [{"id": "exadata-database"}], "headers": {}}',
+    ])
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    databases = oci.list_databases_for_vm_cluster("compartment-id", "vm-cluster-id")
+
+    assert databases == [{"id": "exadata-database"}]
+    assert "--vm-cluster-id" in runner.commands[0]
+    assert "--all" in runner.commands[0]
+    assert _database_page_query(runner.commands[1]) == {
+        "compartmentId": ["compartment-id"],
+        "dbHomeId": ["exadata-home"],
     }
 
 
@@ -201,6 +218,9 @@ def test_oci_cli_compartment_list_requests_all_pages() -> None:
 
     assert oci.list_compartments("tenancy-id") == []
     assert "--all" in runner.commands[0]
+    assert ["--lifecycle-state", "ACTIVE"] == runner.commands[0][
+        runner.commands[0].index("--lifecycle-state") : runner.commands[0].index("--lifecycle-state") + 2
+    ]
 
 
 def test_log_analytics_associated_entity_list_requests_all_pages() -> None:

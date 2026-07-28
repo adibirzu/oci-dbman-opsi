@@ -713,6 +713,69 @@ def test_resume_does_not_mutate_non_resumable_targets(
     assert after == before
 
 
+def test_explicit_retry_reopens_failed_parent_and_dependency_blocked_child(
+    tmp_path: Path,
+) -> None:
+    parent = _target("cdb")
+    child = TargetPlan(
+        "pdb",
+        "pdb",
+        "dbcs",
+        "eu-frankfurt-1",
+        dependencies=("cdb",),
+    )
+    plan = _plan(parent, child)
+    store = FleetStateStore(tmp_path / "state.sqlite")
+    failed = FleetOnboardingExecutor(
+        plan,
+        store,
+        phase_handlers=_handlers([], dbm=RuntimeError("adapter defect")),
+        retries=0,
+    ).execute(approved_plan_id=plan.plan_id, run_id="run-1")
+    assert failed.target("cdb").state is TargetState.FAILED
+    assert failed.target("pdb").state is TargetState.BLOCKED
+
+    calls: list[tuple[str, str]] = []
+    resumed = FleetOnboardingExecutor(
+        plan,
+        store,
+        phase_handlers=_handlers(calls),
+    ).execute(
+        approved_plan_id=plan.plan_id,
+        run_id="run-1",
+        retry_failed=True,
+    )
+    assert resumed.target("cdb").state is TargetState.COMPLETE
+    assert resumed.target("pdb").state is TargetState.COMPLETE
+    assert resumed.target("cdb").checkpoint("dbm").attempts == 2
+
+
+def test_explicit_retry_does_not_reopen_authorization_block(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(_target("db"))
+    store = FleetStateStore(tmp_path / "state.sqlite")
+    FleetOnboardingExecutor(
+        plan,
+        store,
+        phase_handlers=_handlers([], dbm=RuntimeError("403 unauthorized")),
+        retries=0,
+    ).execute(approved_plan_id=plan.plan_id, run_id="run-1")
+
+    calls: list[tuple[str, str]] = []
+    after = FleetOnboardingExecutor(
+        plan,
+        store,
+        phase_handlers=_handlers(calls),
+    ).execute(
+        approved_plan_id=plan.plan_id,
+        run_id="run-1",
+        retry_failed=True,
+    )
+    assert calls == []
+    assert after.target("db").state is TargetState.BLOCKED
+
+
 def test_late_phase_authorization_block_is_checkpointed_on_that_phase(
     tmp_path: Path,
 ) -> None:
