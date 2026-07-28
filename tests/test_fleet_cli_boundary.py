@@ -14,6 +14,7 @@ from dbman_opsi.fleet_auth import AuthMode, OciAuth
 from dbman_opsi.fleet_portable_state import ObjectStorageStateBackend, RemoteLeaseHeartbeat, StateConflictError, StateIntegrityError
 from dbman_opsi.fleet_state import FleetStateStore
 from dbman_opsi.fleet_operations import LifecycleOperations, collection_verdict
+from dbman_opsi.fleet_discovery import DiscoveryScopeError
 from dbman_opsi.credentials import CredentialDecision
 from dbman_opsi.log_analytics import LogAnalyticsDecision
 from dbman_opsi.fleet import ReadinessVerdict
@@ -55,6 +56,32 @@ def test_credential_binding_policy_rejects_duplicate_or_differing_secret_refs() 
 
 def test_status_missing_run_has_deterministic_exit_code(tmp_path: Path) -> None:
     assert main(["fleet-status", "--region", "eu-frankfurt-1", "--state", str(tmp_path / "state.sqlite"), "--run-id", "missing"]) == 6
+
+
+def test_onboard_incomplete_discovery_is_redacted_and_blocked(monkeypatch, capsys) -> None:
+    raw_compartment = "ocid1.compartment.oc1..private-scope"
+
+    def blocked(*_args):
+        raise DiscoveryScopeError(
+            f"fleet discovery is incomplete: eu-frankfurt-1/{raw_compartment}/database"
+        )
+
+    monkeypatch.setattr("dbman_opsi.cli._lifecycle_plan", blocked)
+
+    assert main(
+        [
+            "onboard",
+            "--region",
+            "eu-frankfurt-1",
+            "--answers",
+            "unused.yaml",
+            "--non-interactive",
+            "--plan-only",
+        ]
+    ) == 3
+    output = capsys.readouterr()
+    assert raw_compartment not in output.err
+    assert "<OCI_OCID>" in output.err
 
 
 def test_status_emits_redacted_json_for_saved_run(tmp_path: Path, capsys) -> None:

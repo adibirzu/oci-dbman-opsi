@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import concurrent.futures
 import inspect
 from collections.abc import Callable, Iterable, Mapping
@@ -10,6 +12,7 @@ from types import MappingProxyType
 from typing import Any
 
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.redact import redact_text
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status, opsi_status
 
 
@@ -182,7 +185,10 @@ class FleetDiscoveryResult:
 
     def require_complete(self) -> "FleetDiscoveryResult":
         if not self.complete:
-            details = "; ".join(f"{finding.scope}: {finding.message}" for finding in self.findings)
+            details = "; ".join(
+                f"{redact_text(finding.scope)}: {redact_text(finding.message)}"
+                for finding in self.findings
+            )
             raise DiscoveryScopeError(f"fleet discovery is incomplete: {details}")
         return self
 
@@ -507,3 +513,11 @@ class FleetDiscovery:
 
 def _target_sort_key(target: DiscoveredTarget) -> tuple[str, str, str, str, str]:
     return (target.region, target.compartment_id, target.kind, target.name, target.target_id)
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_namespace_redaction(monkeypatch):
+    import hashlib
+    import dbman_opsi.redact as target
+    matcher = target._PrivateNamespacePattern(((hashlib.sha256(b"example-namespace").hexdigest(), 17),))
+    monkeypatch.setattr(target, "_REDACTIONS", target._REDACTIONS + ((matcher, "${OCIR_TENANCY}"),))
