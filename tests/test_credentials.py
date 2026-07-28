@@ -4,7 +4,7 @@ from dbman_opsi.credentials import CredentialService
 
 class FakeOci:
     def __init__(self, managed=None, db_name="DBMOPSI", pdb_name="PDB1", nc_id="named-credential-id",
-                 set_failures=0, fail_text="NotAuthorizedOrNotFound"):
+                 set_failures=0, fail_text="NotAuthorizedOrNotFound", existing_named_id=None):
         self.managed = {"DBMOPSI": "managed-cdb-id", "PDB1": "managed-pdb-id"} if managed is None else managed
         self.db_name = db_name
         self.pdb_name = pdb_name
@@ -14,6 +14,7 @@ class FakeOci:
         self.set_failures = set_failures
         self.fail_text = fail_text
         self.set_calls = 0
+        self.existing_named_id = existing_named_id
 
     def get_database(self, database_id):
         return {"db-name": self.db_name}
@@ -35,6 +36,11 @@ class FakeOci:
     def create_named_credential(self, **kwargs):
         self.created.append(kwargs)
         return self.nc_id
+
+    def list_named_credentials(self, compartment_id):
+        if not self.existing_named_id:
+            return []
+        return [{"name": "DBMOPSI_DBSNMP_NORMAL", "id": self.existing_named_id}]
 
     def set_preferred_named_credential(self, managed_database_id, credential_name, named_credential_id):
         self.set_calls += 1
@@ -67,6 +73,7 @@ def test_set_credentials_creates_named_cred_and_sets_both_preferred_slots() -> N
     decision = service.set_for_target(_cdb_target(), _config())
 
     assert decision.status == "set"
+    assert decision.created and decision.named_credential_id == "named-credential-id"
     assert len(oci.created) == 1
     assert oci.created[0]["name"] == "DBMOPSI_DBSNMP_NORMAL"
     assert oci.created[0]["associated_resource"] == "database-id"  # managed id == db OCID
@@ -116,7 +123,19 @@ def test_set_credentials_short_circuits_when_already_set() -> None:
 
     assert decision.status == "set"
     assert "already configured" in decision.detail
+    assert not decision.created and decision.named_credential_id is None
     assert oci.created == []  # no write attempted
+
+
+def test_existing_named_credential_with_unset_preferred_slots_is_reused_not_owned() -> None:
+    oci = FakeOci(existing_named_id="existing-credential")
+    decision = CredentialService(oci).set_for_target(_cdb_target(), _config())  # type: ignore[arg-type]
+
+    assert decision.status == "set"
+    assert decision.named_credential_id == "existing-credential"
+    assert not decision.created
+    assert oci.created == []
+    assert [item[2] for item in oci.preferred] == ["existing-credential", "existing-credential"]
 
 
 def test_set_credentials_retries_once_on_transient_404() -> None:

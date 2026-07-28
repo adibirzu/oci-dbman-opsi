@@ -15,6 +15,7 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(
             r"ocid1\.(tenancy|compartment|instance|cluster|networksecuritygroup|"
             r"loadbalancer|subnet|vcn|vnic|bootvolume|loganalytics[a-z]+|user|"
+            r"managementagent|managementagentinstallkey|loganalyticsloggroup|loganalyticsentity|"
             r"database|autonomousdatabase|pluggabledatabase|dbsystem|vault|key|secret|"
             r"databaseinsight|datasafe[a-z]+|dataguardassociation)\.oc1\.[a-z0-9.-]*",
             re.IGNORECASE,
@@ -23,6 +24,9 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"\b(130\.61|161\.153|144\.24|129\.153|141\.147|82\.77|109\.166)\.[0-9]+\.[0-9]+\b"), "<PUBLIC_IP>"),
     (re.compile(r"\b(10\.42|10\.0\.10)\.[0-9]+\.[0-9]+\b"), "<PRIVATE_IP>"),
+    (re.compile(r"\b[a-z0-9_.-]+\.adb\.[a-z0-9-]+\.oraclecloud\.com\b", re.IGNORECASE), "<OCI_ENDPOINT>"),
+    (re.compile(r"\b[a-z0-9_.-]+\.oraclecloud\.com\b", re.IGNORECASE), "<OCI_ENDPOINT>"),
+    (re.compile(r"/[^:\s]*Wallet_[^/\s]+", re.IGNORECASE), "<ADB_WALLET_PATH>"),
     (re.compile(rf"\b({_OCIR_NAMESPACE_PATTERN})\b", re.IGNORECASE), "${OCIR_TENANCY}"),
     (re.compile(rf"\b({_APM_DOMAIN_PATTERN})\b", re.IGNORECASE), "<APM_DOMAIN_ID>"),
     (re.compile(rf"\b({_LA_NAMESPACE_PATTERN})\b", re.IGNORECASE), "<LA_NAMESPACE>"),

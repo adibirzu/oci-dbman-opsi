@@ -14,9 +14,11 @@ from dbman_opsi.redact import redact_data
 
 TargetKind = Literal["dbcs", "autonomous", "exadata", "external-db", "external-exadata"]
 
-# The three observability/security/management pillars a target can opt into.
+# The four observability/security/management pillars a target can opt into.
 # "dbm" = Database Management, "opsi" = Operations Insights, "datasafe" = Data Safe.
-Service = Literal["dbm", "opsi", "datasafe"]
+# "logan" = Log Analytics. The loader accepts "loganalytics" as a compatibility
+# alias and normalizes it to "logan".
+Service = Literal["dbm", "opsi", "datasafe", "logan"]
 DEFAULT_SERVICES: tuple[Service, ...] = ("dbm", "opsi")
 ALLOWED_TARGET_KINDS = frozenset(get_args(TargetKind))
 ALLOWED_SERVICES = frozenset(get_args(Service))
@@ -51,6 +53,16 @@ class VaultSelection:
 
 
 @dataclass(frozen=True)
+class LogAnalyticsSelection:
+    namespace: str | None = None
+    log_group_id: str | None = None
+    log_group_name: str = "dbman-opsi-logan"
+    onboard_namespace: bool = False
+    create_log_group: bool = True
+    create_adb_collector: bool = False
+
+
+@dataclass(frozen=True)
 class Target:
     kind: TargetKind
     name: str
@@ -81,6 +93,18 @@ class Target:
     # to this DB; its Data Safe private endpoint lives in the DB subnet.
     data_safe_target_id: str | None = None
     data_safe_private_endpoint_id: str | None = None
+    # Log Analytics: entity/source associations are handled outside Terraform.
+    logan_database_entity_id: str | None = None
+    logan_host_entity_id: str | None = None
+    logan_listener_entity_id: str | None = None
+    logan_adb_entity_id: str | None = None
+    logan_management_agent_id: str | None = None
+    logan_sources: tuple[str, ...] = ()
+    logan_adr_home: str | None = None
+    logan_oracle_home: str | None = None
+    logan_install_home: str | None = None
+    logan_hostname: str | None = None
+    logan_adb_service_name: str | None = None
     # Which pillars to enable for this target. Defaults to DBM + OPSI so existing
     # configs (which omit the field) keep their prior behavior; Data Safe is opt-in.
     services: tuple[Service, ...] = DEFAULT_SERVICES
@@ -102,6 +126,7 @@ class EnablementConfig:
     compartment_id: str | None = None
     network: NetworkSelection = field(default_factory=NetworkSelection)
     vault: VaultSelection = field(default_factory=VaultSelection)
+    log_analytics: LogAnalyticsSelection = field(default_factory=LogAnalyticsSelection)
     targets: tuple[Target, ...] = ()
     policy_group_name: str = "dbman-opsi-admins"
     dry_run: bool = True
@@ -119,10 +144,22 @@ def _vault_from_dict(value: dict[str, Any] | None) -> VaultSelection:
     return VaultSelection(**(value or {}))
 
 
+def _log_analytics_from_dict(value: dict[str, Any] | None) -> LogAnalyticsSelection:
+    return LogAnalyticsSelection(**(value or {}))
+
+
+def _normalize_service(value: object) -> object:
+    if value == "loganalytics":
+        return "logan"
+    return value
+
+
 def _target_from_dict(value: dict[str, Any]) -> Target:
     data = dict(value)
     if "services" in data and data["services"] is not None:
-        data["services"] = tuple(data["services"])
+        data["services"] = tuple(_normalize_service(service) for service in data["services"])
+    if "logan_sources" in data and data["logan_sources"] is not None:
+        data["logan_sources"] = tuple(data["logan_sources"])
     return Target(**data)
 
 
@@ -130,6 +167,7 @@ def _target_to_dict(target: Target) -> dict[str, Any]:
     # YAML safe_dump cannot represent tuples, so normalize services to a list.
     data = dict(target.__dict__)
     data["services"] = list(target.services)
+    data["logan_sources"] = list(target.logan_sources)
     return data
 
 
@@ -144,6 +182,7 @@ def from_dict(value: dict[str, Any]) -> EnablementConfig:
         compartment_id=value.get("compartment_id"),
         network=_network_from_dict(value.get("network")),
         vault=_vault_from_dict(value.get("vault")),
+        log_analytics=_log_analytics_from_dict(value.get("log_analytics")),
         targets=tuple(_target_from_dict(item) for item in value.get("targets", [])),
         policy_group_name=value.get("policy_group_name", "dbman-opsi-admins"),
         dry_run=bool(value.get("dry_run", True)),
@@ -265,6 +304,7 @@ def to_dict(config: EnablementConfig) -> dict[str, Any]:
         "compartment_id": config.compartment_id,
         "network": config.network.__dict__,
         "vault": config.vault.__dict__,
+        "log_analytics": config.log_analytics.__dict__,
         "targets": [_target_to_dict(target) for target in config.targets],
         "policy_group_name": config.policy_group_name,
         "dry_run": config.dry_run,

@@ -8,6 +8,17 @@ from dbman_opsi._oci_base import _OciBase
 
 
 class NetworkCommands(_OciBase):
+    def delete_run_owned_subnet(self, subnet_id: str) -> None:
+        self.run(["network", "subnet", "delete", "--subnet-id", subnet_id, "--force"])
+
+    def delete_run_owned_vcn(self, vcn_id: str) -> None:
+        self.run(["network", "vcn", "delete", "--vcn-id", vcn_id, "--force"])
+
+    def delete_run_owned_route_table(self, route_table_id: str) -> None:
+        self.run(["network", "route-table", "delete", "--rt-id", route_table_id, "--force"])
+
+    def delete_run_owned_security_list(self, security_list_id: str) -> None:
+        self.run(["network", "security-list", "delete", "--security-list-id", security_list_id, "--force"])
     def list_vcns(self, compartment_id: str) -> list[dict[str, Any]]:
         data = self.run_json(["network", "vcn", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)

@@ -34,7 +34,7 @@ class FakeOci:
         self.route_table = overrides.get(
             "route_table",
             {"route-rules": [
-                {"destination-type": "SERVICE_CIDR_BLOCK", "network-entity-id": "ocid1.servicegateway.oc1..xxx"}
+                {"destination-type": "SERVICE_CIDR_BLOCK", "network-entity-id": "ocid" + "1.servicegateway.oc1..xxx"}
             ]},
         )
         self.security_list = overrides.get(

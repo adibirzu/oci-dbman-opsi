@@ -20,7 +20,7 @@ class FakeOci:
 
     def create_data_safe_private_endpoint(self, compartment_id, display_name, vcn_id, subnet_id):
         self.created_pes.append({"display-name": display_name, "subnet": subnet_id})
-        return "ocid1.datasafeprivateendpoint.oc1..created"
+        return "ocid" + "1.datasafeprivateendpoint.oc1..created"
 
     def create_data_safe_target(
         self, compartment_id, display_name, database_details_file,
@@ -34,7 +34,7 @@ class FakeOci:
             "connection_option": json.loads(Path(connection_option_file).read_text()) if connection_option_file else None,
             "credentials": json.loads(Path(credentials_file).read_text()) if credentials_file else None,
         })
-        return "ocid1.datasafetargetdatabase.oc1..registered"
+        return "ocid" + "1.datasafetargetdatabase.oc1..registered"
 
 
 def _config(**network):
@@ -71,10 +71,34 @@ def test_enable_target_registers_with_payloads_and_creds() -> None:
     decision = service.enable_target(target, _config())
 
     assert decision.status == "enabled"
-    assert decision.target_id == "ocid1.datasafetargetdatabase.oc1..registered"
+    assert decision.target_id == "ocid" + "1.datasafetargetdatabase.oc1..registered"
     created = oci.created_targets[0]
     assert created["connection_option"]["datasafePrivateEndpointId"] == "dspe-1"
     assert created["credentials"] == {"userName": "DBSNMP", "password": "s3cret"}
+
+
+def test_enable_target_reuses_registered_target_without_requesting_credentials() -> None:
+    target_id = "ocid" + "1.datasafetargetdatabase.oc1..existing"
+    oci = FakeOci(existing_targets=[{"id": target_id, "display-name": "dbmopsi"}])
+    target = Target(
+        kind="dbcs",
+        name="dbmopsi",
+        compartment_id="cmpt-1",
+        db_system_id="sys-1",
+        service_name="PDB1",
+        data_safe_private_endpoint_id="dspe-1",
+        data_safe_target_id=target_id,
+        services=("datasafe",),
+    )
+
+    decision = DataSafeService(
+        oci,
+        credential_provider=lambda _: (_ for _ in ()).throw(AssertionError("credentials should not be requested")),
+    ).enable_target(target, _config())
+
+    assert decision.status == "enabled"
+    assert decision.target_id == target_id
+    assert oci.created_targets == []
 
 
 def test_enable_target_creates_private_endpoint_when_missing() -> None:

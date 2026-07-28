@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dbman-opsi"
 version = "0.1.0"
-description = "End-to-end OCI Database Management and Ops Insights enablement for DBCS, Autonomous Database, Exadata, and external databases."
+description = "End-to-end OCI Database Management, Ops Insights, Data Safe, and Log Analytics enablement for Oracle databases."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

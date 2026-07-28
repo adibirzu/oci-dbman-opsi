@@ -6,12 +6,21 @@ resource "oci_identity_policy" "dbman_opsi" {
   statements     = var.policy_statements
 }
 
+locals {
+  lifecycle_tags = {
+    "dbman_opsi_lifecycle"       = var.demo_lifecycle_id
+    "dbman_opsi_disposable"      = "true"
+    "dbman_opsi_evidence_retain" = "${var.evidence_retention_days}d"
+  }
+}
+
 resource "oci_core_vcn" "test" {
   count          = var.create_test_network ? 1 : 0
   compartment_id = var.compartment_ocid
   cidr_block     = var.test_vcn_cidr
   display_name   = "dbman-opsi-vcn"
-  dns_label      = "dbmanopsi"
+  dns_label      = "dbopsdemo"
+  freeform_tags  = local.lifecycle_tags
 }
 
 # The private subnet that hosts the Database Management / Ops Insights private
@@ -33,6 +42,7 @@ resource "oci_core_service_gateway" "test" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.test[0].id
   display_name   = "dbman-opsi-sgw"
+  freeform_tags  = local.lifecycle_tags
 
   services {
     service_id = local.oci_all_services[0].id
@@ -44,6 +54,7 @@ resource "oci_core_route_table" "test" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.test[0].id
   display_name   = "dbman-opsi-rt"
+  freeform_tags  = local.lifecycle_tags
 
   route_rules {
     destination       = local.oci_all_services[0].cidr_block
@@ -57,6 +68,7 @@ resource "oci_core_security_list" "test" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.test[0].id
   display_name   = "dbman-opsi-sl"
+  freeform_tags  = local.lifecycle_tags
 
   egress_security_rules {
     destination = "0.0.0.0/0"
@@ -73,6 +85,18 @@ resource "oci_core_security_list" "test" {
       max = 1522
     }
   }
+
+  # OCI Bastion reaches the private jump host inside this disposable VCN. Keep
+  # SSH scoped to the demo VCN; never expose port 22 to the internet.
+  ingress_security_rules {
+    protocol = "6"
+    source   = var.test_vcn_cidr
+
+    tcp_options {
+      min = 22
+      max = 22
+    }
+  }
 }
 
 resource "oci_core_subnet" "test_private" {
@@ -85,13 +109,13 @@ resource "oci_core_subnet" "test_private" {
   dns_label                  = "dbmopsi"
   route_table_id             = oci_core_route_table.test[0].id
   security_list_ids          = [oci_core_security_list.test[0].id]
+  freeform_tags              = local.lifecycle_tags
 }
 
 locals {
-  selected_vcn_id      = var.create_test_network ? oci_core_vcn.test[0].id : var.vcn_ocid
-  selected_subnet_id   = var.create_test_network ? oci_core_subnet.test_private[0].id : var.subnet_ocid
-  provision_dbcs       = { for target in var.targets : target.name => target if target.provision && target.kind == "dbcs" }
-  provision_autonomous = { for target in var.targets : target.name => target if target.provision && target.kind == "autonomous" }
+  selected_vcn_id    = var.create_test_network ? oci_core_vcn.test[0].id : var.vcn_ocid
+  selected_subnet_id = var.create_test_network ? oci_core_subnet.test_private[0].id : var.subnet_ocid
+  logan_targets      = { for target in var.targets : target.name => target if contains(try(target.services, []), "logan") }
 }
 
 resource "oci_database_management_db_management_private_endpoint" "dbmgmt" {
@@ -99,6 +123,7 @@ resource "oci_database_management_db_management_private_endpoint" "dbmgmt" {
   name           = "dbman_opsi_dbmgmt_pe"
   subnet_id      = local.selected_subnet_id
   description    = "Database Management private endpoint for dbman-opsi PoC."
+  freeform_tags  = local.lifecycle_tags
 }
 
 resource "oci_kms_vault" "test" {
@@ -106,58 +131,19 @@ resource "oci_kms_vault" "test" {
   compartment_id = var.compartment_ocid
   display_name   = "dbman-opsi-vault"
   vault_type     = "DEFAULT"
+  freeform_tags  = local.lifecycle_tags
 }
 
-resource "oci_database_db_system" "dbcs" {
-  for_each            = local.provision_dbcs
+resource "oci_kms_key" "demo" {
+  count               = var.create_vault && var.key_ocid == null ? 1 : 0
   compartment_id      = var.compartment_ocid
-  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain_index].name
-  subnet_id           = local.selected_subnet_id
-  display_name        = each.value.name
-  shape               = var.dbcs_shape
-  database_edition    = "ENTERPRISE_EDITION"
-  ssh_public_keys     = var.ssh_public_keys
-  license_model       = "LICENSE_INCLUDED"
-  node_count          = 1
-  # When the subnet has no DNS label, the DB system launch requires an explicit
-  # network domain ("domain name cannot be null"). Reuse the subnet's existing
-  # DB domain. null lets the provider derive it from a DNS-enabled subnet.
-  domain = var.dbcs_domain
-  # Flex shapes (e.g. VM.Standard.E4.Flex) require an explicit core count, and a
-  # VM DB system requires a data storage size. Without these, apply fails with a
-  # missing-required-attribute error.
-  cpu_core_count          = var.dbcs_cpu_core_count
-  data_storage_size_in_gb = var.dbcs_data_storage_gb
-  hostname                = substr(replace(lower(each.value.name), "/[^a-z0-9]/", ""), 0, 12)
-
-  db_home {
-    db_version   = var.db_version
-    display_name = "${each.value.name}-home"
-
-    database {
-      db_name        = substr(replace(each.value.name, "-", ""), 0, 8)
-      admin_password = var.db_admin_password
-      character_set  = "AL32UTF8"
-      ncharacter_set = "AL16UTF16"
-    }
+  display_name        = "dbman-opsi-demo-key"
+  management_endpoint = oci_kms_vault.test[0].management_endpoint
+  key_shape {
+    algorithm = "AES"
+    length    = 32
   }
-}
-
-resource "oci_database_autonomous_database" "adb" {
-  for_each                 = local.provision_autonomous
-  compartment_id           = var.compartment_ocid
-  display_name             = each.value.name
-  db_name                  = substr(replace(each.value.name, "-", ""), 0, 14)
-  admin_password           = var.adb_admin_password
-  compute_count            = var.adb_compute_count
-  compute_model            = "ECPU"
-  data_storage_size_in_tbs = var.adb_storage_tbs
-  db_workload              = "OLTP"
-  is_free_tier             = false
-}
-
-data "oci_identity_availability_domains" "ads" {
-  compartment_id = var.tenancy_ocid
+  freeform_tags = local.lifecycle_tags
 }
 
 output "vcn_ocid" {
@@ -177,15 +163,61 @@ output "service_gateway_ocid" {
 }
 
 output "provisioned_dbcs_ids" {
-  value = { for name, system in oci_database_db_system.dbcs : name => system.id }
+  description = "Provisioning is disabled in this public Terraform stack because OCI database admin passwords would enter state."
+  value       = {}
 }
 
 output "provisioned_autonomous_database_ids" {
-  value = { for name, database in oci_database_autonomous_database.adb : name => database.id }
+  description = "Provisioning is disabled in this public Terraform stack because OCI database admin passwords would enter state."
+  value       = {}
 }
 
-# Optional DBM + OPSI enablement (modular, off by default). service_name/host_ip
-# are runtime-discovered, so populate var.observability_targets after the DB is up.
+output "log_analytics_namespace" {
+  value = var.enable_log_analytics ? var.log_analytics_namespace : null
+}
+
+output "log_analytics_log_group_ocid" {
+  value = var.enable_log_analytics ? var.log_analytics_log_group_ocid : null
+}
+
+output "log_analytics_entity_ids" {
+  value = {
+    for name, target in local.logan_targets : name => {
+      database = target.logan_database_entity_id
+      host     = target.logan_host_entity_id
+      adb      = target.logan_adb_entity_id
+    }
+  }
+}
+
+output "log_analytics_collector_instance_id" {
+  value = null
+}
+
+output "log_analytics_collector_private_ip" {
+  value = null
+}
+
+output "disposable_lifecycle" {
+  description = "Non-secret scope for safe teardown and evidence retention verification."
+  value = {
+    lifecycle_id            = var.demo_lifecycle_id
+    evidence_retention_days = var.evidence_retention_days
+    destroy_command         = "terraform destroy -var='demo_lifecycle_id=${var.demo_lifecycle_id}'"
+  }
+}
+
+output "vault_ocid" {
+  value = var.create_vault ? oci_kms_vault.test[0].id : var.vault_ocid
+}
+
+output "key_ocid" {
+  value = var.create_vault ? oci_kms_key.demo[0].id : var.key_ocid
+}
+
+# Optional DBM + OPSI enablement (modular, off by default).  Target descriptors
+# contain service names and Vault references only; DB node IPs are never placed
+# in Terraform variables or state.
 module "observability" {
   count  = var.enable_observability ? 1 : 0
   source = "../../modules/dbm-opsi-enablement"
@@ -193,7 +225,12 @@ module "observability" {
   compartment_id           = var.compartment_ocid
   dbm_private_endpoint_id  = oci_database_management_db_management_private_endpoint.dbmgmt.id
   opsi_private_endpoint_id = var.opsi_private_endpoint_id
-  password_secret_id       = var.dbsnmp_secret_id
   enable_ops_insights      = var.opsi_private_endpoint_id != null
-  targets                  = var.observability_targets
+  lifecycle_id             = var.demo_lifecycle_id
+  owner_tag                = "dbman-opsi-demo"
+  targets = {
+    for name, target in var.observability_targets : name => merge(target, {
+      password_secret_id = target.password_secret_id != null ? target.password_secret_id : var.dbsnmp_secret_id
+    })
+  }
 }

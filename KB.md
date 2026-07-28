@@ -2,6 +2,359 @@
 
 This KB captures implementation and live-tenancy troubleshooting notes for OCI Database Management (DBM) and Operations Insights (OPSI). Keep tenant-specific values out of this file: no OCIDs, IP addresses, usernames beyond generic service users, secrets, Bastion session IDs, or private topology.
 
+## 2026-06-26 Live Management Agent + Log Analytics + Data Safe Drift Fixes
+
+### Management Agent image `object-url` was not directly downloadable
+
+- Symptom: the generated Log Analytics host install packet resolved a Management
+  Agent `object-url`, but both workstation and DB VM downloads returned `404`.
+- Root cause: the OCI CLI `management-agent agent-image list` response included
+  object metadata that was valid for authenticated `oci os object get`, but the
+  raw `object-url` was not a reliable anonymous download path in this tenancy /
+  CLI combination.
+- Fix:
+  - update `src/dbman_opsi/agent_scripts.py` so the generated resolver script
+    emits object namespace/bucket/name/checksum metadata and can download the
+    RPM locally with `oci os object get`;
+  - keep `AGENT_RPM_URL` only as a hint, not the preferred path.
+- Validation: live authenticated object download succeeded; the RPM checksum
+  matched the image metadata checksum.
+
+### OCI Management Agent install needed Java 8 on the DB VM
+
+- Symptom: the Management Agent RPM preinstall script failed on the DB VM with a
+  Java version gate while `/usr/bin/java` still pointed at Java 11.
+- Root cause: this agent build required Java 8u281+ for the installer path used
+  on the target DBCS host.
+- Fix:
+  - install Java 8 on the DB VM for the live demo;
+  - update the generated Linux install script to detect/install Java 8, set
+    `JAVA_HOME`, and use that runtime during the RPM + setup flow.
+- Validation: live Management Agent install succeeded on the DB VM and the
+  agent registered with the Log Analytics plugin.
+
+### Log Analytics association flow was functionally correct but too slow per-source
+
+- Symptom: the live `configure --with-log-analytics` path appeared stuck during
+  source association.
+- Root cause:
+  - one `log-analytics assoc upsert-assocs` call was being issued per source;
+  - each call returned a Log Analytics config work request, so the total latency
+    stacked badly for DBCS targets with many sources.
+- Fix:
+  - batch source associations into a single `upsert-assocs` call per target via
+    `src/dbman_opsi/log_analytics.py` and `src/dbman_opsi/_oci_loganalytics.py`;
+  - keep the per-source JSON payload files on disk for operator visibility.
+- Validation: the narrowed live `LogAnalyticsService.enable_all(...)` run
+  completed successfully for the DBCS target and applied the full source set in
+  one batch.
+
+### Existing DBCS Data Safe registration was live; local config was stale
+
+- Symptom: the local ignored config still showed `datasafe` absent and had no
+  Data Safe target or private endpoint OCIDs for the current DBCS target.
+- Root cause: live tenancy state had moved ahead of the local ignored config.
+- Fix:
+  - verify the target database's parent DB system and match it against existing
+    Data Safe registrations via `associated-resource-ids`;
+  - update the local ignored config to include the DB system, Data Safe private
+    endpoint, Data Safe target, and `datasafe` service membership.
+- Validation: the live DB incident evidence bundle reported Data Safe source
+  status `ok` instead of `unavailable`.
+
+### Repo needed a first-class demo operator path for Data Safe audit export
+
+- Symptom: the repo could register Data Safe targets, but it did not document or
+  automate the bridge from Data Safe audit events into OCI Logging / Log Analytics.
+- Fix:
+  - add `scripts/demo-datasafe-log-export.sh`;
+  - add `docs/datasafe-log-analytics.md`;
+  - add sanitized dashboard/query asset generation for the demo.
+- Validation: script syntax tests pass and the workflow is now documented with
+  explicit `--apply` gates and demo-only scope.
+
+### Evidence bundle and operator scripts needed live Data Safe audit visibility
+
+- Symptom:
+  - the DB incident evidence bundle only used Data Safe for target inventory;
+  - the export script could create the bridge, but operators had no bounded
+    status view for recent Data Safe audit rows or Log Analytics hits.
+- Fix:
+  - add `list_data_safe_audit_events(...)` to the OCI CLI facade;
+  - extend `src/dbman_opsi/db_incident.py` so Data Safe contributes both target
+    context and recent audit events to the evidence timeline;
+  - extend `scripts/demo-datasafe-log-export.sh` with `targets` and `status`
+    commands, connector wait logic, and sanitized table output;
+  - update docs to describe the replicable end-to-end order.
+- Validation:
+  - targeted tests passed for the new OCI CLI command shape, evidence bundle,
+    and script help surface;
+  - live `status` confirmed the custom-log connector is ACTIVE, target
+    registration is present, and recent audit/log counts are visible.
+
+### Live failed-login testing can lock the monitoring account and break observability
+
+- Symptom: a deliberate wrong-password probe against the monitoring account
+  caused `ORA-28000`, after which DBM/OPSI/Data Safe drilldowns lost their DB
+  service-user path until the account was unlocked.
+- Root cause:
+  - failed-login drills were safe when scoped to `DBINC_LAB`, but not when
+    aimed at the shared monitoring account;
+  - the demo packet documented Data Safe audit generation but did not carry the
+    DBA-only monitoring-account inspection and recovery SQL alongside it.
+- Fix:
+  - add `12-check-monitoring-account-status.sql` and
+    `13-remediate-monitoring-account-lock.sql` to the generated DB incident
+    packet;
+  - update the packet runbook, `scripts/demo-db-incident-e2e.sh`, and the Data
+    Safe export docs to make `DBINC_LAB` the only approved failed-login drill
+    target and point operators to the recovery SQL for `ORA-28000`.
+- Validation:
+  - targeted packet-generation tests cover the new artifacts and manifest
+    metadata;
+  - shell/docs tests assert the warning remains visible in the operator path.
+
+### Data Safe audit verification query used the wrong timestamp format model
+
+- Symptom: the live DB incident packet reached the Data Safe audit verification
+  step, but `11-verify-datasafe-demo-audit.sql` failed with
+  `ORA-01821: date format not recognized`.
+- Root cause: the generated query formatted `UNIFIED_AUDIT_TRAIL.EVENT_TIMESTAMP`
+  with `TZH:TZM`, but the local DB type/implicit conversion path on the demo DB
+  did not accept that timezone suffix.
+- Fix:
+  - change the generated `TO_CHAR(event_timestamp, ...)` format in
+    `src/dbman_opsi/db_incident.py` to `YYYY-MM-DD\"T\"HH24:MI:SS.FF3` without
+    the timezone fields;
+  - add a regression assertion in `tests/test_db_incident.py`.
+- Validation:
+  - the packet generator test now asserts the timezone format suffix is absent;
+  - the corrected script can be regenerated and rerun directly on the DB host
+    without rebuilding the whole demo flow.
+
+### Data Safe target ACTIVE did not mean audit collection was provisioned
+
+- Symptom:
+  - the demo PDB target and private endpoint were both `ACTIVE`;
+  - the DB host showed real `UNIFIED_AUDIT_TRAIL` rows for `DBINC_LAB`;
+  - `scripts/demo-datasafe-log-export.sh status` still showed zero Data Safe
+    audit events and zero Log Analytics rows for the Data Safe custom source.
+- Root cause:
+  - target registration alone was not enough;
+  - no Data Safe audit profile or audit trail resources existed in the
+    compartment yet, so Data Safe had nothing to collect even after the DB-side
+    audit policy and activity were valid.
+- Fix:
+  - extend `scripts/demo-datasafe-log-export.sh status` to report audit profile
+    and audit trail counts alongside target counts;
+  - update `docs/datasafe-log-analytics.md` so operators know to distinguish
+    target registration from audit collection provisioning.
+- Validation:
+  - live status can now reveal the difference between "registered target, no
+    audit collection" and "audit collection exists but no recent rows."
+
+## 2026-06-25 DB Incident Observability Demo E2E
+
+### Scope
+
+- Area: `generate-db-incident-demo`, `scripts/demo-db-incident-e2e.sh`, generated SQL*Plus packet, Log Analytics evidence workflow, `oci-coordinator-oke` handoff assets.
+- Goal: run a full demo-only DB incident workflow against a dedicated demo PDB, generate real Oracle errors plus synthetic alert-log markers, install Oracle HR/CO sample schemas, and verify DB-side and OCI-side troubleshooting paths.
+
+### Real demo errors now generated successfully
+
+- `ORA-00001` duplicate primary key
+- `ORA-01400` null-in-not-null column
+- `ORA-02291` foreign-key parent missing
+- `ORA-00942` missing object
+- `ORA-00054` NOWAIT lock conflict
+- `PLS-00201` / `PLS-00905` / `ORA-06550` invalid-object and compiler diagnostics
+- Reviewed synthetic alert-log markers for `ORA-00600` / `ORA-07445` correlation only
+
+### CDB root schema creation failed with `ORA-65096`
+
+- Symptom: the first live run failed creating `DBINC_LAB` with `ORA-65096: invalid common user or role name`.
+- Root cause: the runner connected as local SYSDBA in CDB root and attempted to create a local demo user there.
+- Fix:
+  - add `DB_INCIDENT_PDB_NAME` support to the generated setup and cleanup SQL;
+  - `ALTER SESSION SET CONTAINER` before user create/drop;
+  - pass the PDB name only through the SSH-stdin remote process environment.
+- Validation: live run created `DBINC_LAB` in the demo PDB successfully.
+
+### PDB-aware values were not propagated to the remote workload
+
+- Symptom: local `.env.local` had PDB settings, but the remote packet behaved as if they were unset.
+- Root cause: `jumphost-run` only exported four DB incident variables into the remote workload environment.
+- Fix: propagate `DB_INCIDENT_PDB_NAME`, `DB_INCIDENT_PDB_SERVICE`, `DB_INCIDENT_LAB_CONNECT`, and later `DB_INCIDENT_LAB_EZCONNECT`.
+- Validation: the remote workload environment included the new variables and the setup SQL received the PDB name without persisting a credential file.
+
+### Lab-user connect syntax was fragile across shell and SQL*Plus boundaries
+
+- Symptoms:
+  - `ORA-12154` when the lab-user service name was unresolved on the DB host
+  - `ORA-12541` when testing against `127.0.0.1` and no listener was bound there
+  - `SP2-0306: Invalid option` when a full connect string with quoting crossed the wrapper boundary badly
+- Root causes:
+  - the listener was bound on the DB host address, not loopback;
+  - the earlier `DB_INCIDENT_LAB_CONNECT` approach embedded too much quoting in one variable.
+- Fix:
+  - introduce `DB_INCIDENT_LAB_EZCONNECT` as the target-only Easy Connect string;
+  - make the generated runner build `DBINC_LAB/"$DB_INCIDENT_LAB_PASSWORD"@<target>` itself;
+  - keep `DB_INCIDENT_LAB_CONNECT` as an override, but prefer `DB_INCIDENT_LAB_EZCONNECT` for DB-host execution.
+- Validation: live DBINC_LAB connections succeeded and the workload executed end to end in the PDB.
+
+### Disposable demo password failed policy checks
+
+- Symptom: `ORA-28003` plus password verify message requiring two or more special characters.
+- Root cause: the demo DB password verify function was stricter than the initial disposable password choice.
+- Fix: rotate the local-only lab password to a demo-safe value that satisfies the verify function and still works with SQL*Plus when quoted by the runner.
+- Validation: `DBINC_LAB`, `HR`, and `CO` users were created successfully in the live run.
+
+### Incident evidence table and procedures hit `ORA-01031`
+
+- Symptom: `incident_event_log` creation and `log_event` / `attempt_parent_lock_nowait` / `broken_compile_demo` creation failed with insufficient privileges.
+- Root cause: the disposable lab schema only had `CREATE SESSION` and `CREATE TABLE`.
+- Fix: grant `CREATE PROCEDURE` and `CREATE SEQUENCE` during lab-schema setup.
+- Validation: the live workload created tables, procedures, compiler diagnostics, and lock-conflict evidence successfully.
+
+### Generated query failed on `ORA-01821`
+
+- Symptom: `03-query-evidence.sql` failed formatting `event_time`.
+- Root cause: the column is plain `TIMESTAMP`, but the query used a timezone format model (`TZH:TZM`).
+- Fix: remove the timezone suffix from the `TO_CHAR` format in generated evidence and troubleshooting queries.
+- Validation: the live evidence timeline, repetition summary, and source coverage query completed successfully.
+
+### Oracle sample schema installers were interactive
+
+- Symptom: `hr_install.sql` and `co_install.sql` stopped on `ACCEPT` prompts and raised “password is mandatory”.
+- Root cause: upstream sample-schema install scripts are interactive even when invoked from a SQL*Plus here-doc.
+- Fix:
+  - download the official Oracle sample schema archive at runtime;
+  - rewrite the upstream `ACCEPT pass`, `ACCEPT tbs`, and `ACCEPT overwrite_schema` lines into non-interactive `DEFINE` statements in temporary `*.dbinc.sql` copies;
+  - execute those rewritten copies from the original schema directories so relative `@@...` includes still resolve.
+- Validation: live HR and CO installs completed and verified their row counts.
+
+### Sample schema work directory was not writable to `oracle`
+
+- Symptom: the installer failed creating `oracle-db-sample-schemas` under the copied packet directory.
+- Root cause: the packet tree was copied by the SSH user and not writable by the `oracle` OS user.
+- Fix: move sample-schema download/extract work into `DB_INCIDENT_WORK_DIR` with default `${TMPDIR:-/tmp}/db-incident-sample-schemas`.
+- Validation: HR and CO were downloaded, extracted, installed, and granted to `DBINC_LAB`.
+
+### Read-only troubleshooting query pack had data-dictionary mismatches
+
+- Symptoms:
+  - the privileges section failed against `ALL_TAB_PRIVS`;
+  - the final lock/session section failed when `V$SESSION` was not visible to `DBINC_LAB`.
+- Root causes:
+  - `ALL_TAB_PRIVS` in this environment exposes `TABLE_SCHEMA`, not the originally queried column shape;
+  - the disposable lab schema does not have catalog privileges for `V$SESSION`.
+- Fix:
+  - query `TABLE_SCHEMA` in the privileges section;
+  - make the `V$SESSION` section non-fatal with `whenever sqlerror continue`.
+- Validation:
+  - invalid-object, compiler-error, privilege, and evidence-row sections returned useful results live;
+  - `V$SESSION` is now treated as optional context instead of a hard failure.
+
+### Fresh packet copies could execute stale files
+
+- Symptom: remote runs sometimes used older generated content even after local fixes.
+- Root cause: repeated copies into the same remote packet directory made it easy to confuse stale and current payloads during iterative debugging.
+- Fix: for live validation, use a new timestamped `OUTPUT_DIR` per run.
+- Validation: the successful end-to-end run used a unique packet directory and matched the latest generated content.
+
+### Generated runner should fail on connect errors before running SQL blocks
+
+- Symptom: a failed `connect` could still leave later SQL text running and printing misleading section headers.
+- Root cause: the wrapper entered SQL files after `connect` without an early `whenever sqlerror exit`.
+- Fix: add `whenever oserror exit 1` and `whenever sqlerror exit sql.sqlcode` before each `connect` in the generated shell runner and sample-schema installer.
+- Validation: later failures surfaced immediately at the connect step instead of degrading into follow-on noise.
+
+### OCI-side evidence bundle worked; Log Analytics scenario query stayed empty
+
+- Symptom:
+  - `scripts/demo-db-incident-e2e.sh logan-check` returned a bounded `db_incident_analysis` bundle with source status for Log Analytics, DBM, OPSI, and Data Safe;
+  - `scripts/demo-db-incident-e2e.sh logan-scenario-check` returned zero matches for the fresh scenario even after the DB-side alert-log marker write succeeded.
+- Interpretation:
+  - the OCI evidence service path is working and source reachability is confirmed;
+  - the specific alert-log marker records were not yet visible in Log Analytics during this validation window.
+- Likely causes:
+  - ingestion lag; or
+  - Management Agent source/entity association drift for the alert log on the demo DB host.
+- Fix path:
+  - keep using Management Agent ingestion for the live demo;
+  - verify alert-log source associations on the DB entity;
+  - rerun `logan-scenario-check` after the next ingestion interval;
+  - use the DB-side evidence timeline plus the OCI evidence bundle even when the fresh marker lines are not yet searchable.
+- Validation:
+  - DB-side execution, DBM list, OPSI list, and Data Safe list all succeeded live;
+  - Log Analytics search for the scenario was still zero-row at the time of validation.
+
+### Log Analytics DBCS source-association path used stale source names, stale CLI verb, and the wrong payload shape
+
+- Symptom:
+  - `dbman-opsi log-analytics --apply` could not configure DB log ingestion reliably;
+  - the repo emitted friendly display names like `Oracle Database Alert Logs`;
+  - the OCI CLI in this environment has no `log-analytics source upsert-association` command.
+- Root cause:
+  - the service expects canonical built-in source names such as `DBAlertLogSource`, `DBAuditLogSource`, `LinuxSyslogSource`, and `unifieddbauditlogfromdbsource122`;
+  - the current OCI CLI uses `log-analytics assoc upsert-assocs`;
+  - the API expects an `items` list with `associationProperties`, not a single object with `sourceProperties`.
+- Fix:
+  - normalize legacy/friendly source names to OCI canonical source names;
+  - switch the CLI facade to `assoc upsert-assocs`;
+  - emit generated association payloads as a JSON list using `associationProperties`;
+  - persist any resolved log group or entity OCIDs back into the ignored local config during `--apply`.
+- Validation:
+  - focused tests now pass for source normalization, payload generation, CLI command shape, config persistence, and dry-run behavior.
+
+### DBCS/Base DB Log Analytics ingestion needs a Management Agent-backed entity, not a detached manual entity
+
+- Symptom:
+  - live `log-analytics --apply` against the demo DBCS target created standalone Log Analytics entities, but OCI rejected every source association with `Entity is either not ready for association or not in the passed in compartment`;
+  - the DB host had no OCI Management Agent installation.
+- Root cause:
+  - for the tested DBCS/Base DB path, OCI Log Analytics source associations require a Management Agent-backed ingestion path;
+  - DBM/OPSI being enabled on an OCI-native database is not enough to make DB alert/audit/host log collection work in Log Analytics.
+- Fix:
+  - stop auto-creating detached entities when no Management Agent path is configured;
+  - block early with a precise message: install a Management Agent with the `logan` plugin or supply existing Management Agent-backed entity OCIDs;
+  - keep `logan_hostname`, `logan_oracle_home`, and `logan_adr_home` in the ignored local config so a later Management Agent install can reuse the same payloads.
+- Validation:
+  - live `dbman-opsi log-analytics --apply` now exits cleanly with a blocked target instead of an OCI traceback;
+  - temporary detached entities created during validation were deleted from the demo compartment afterward.
+
+### Management Agent install flow is now generated into the project for DBCS/Base DB Log Analytics demos
+
+- Change:
+  - `generate-agent-scripts` now emits install-key, host install, host verify, and OCI agent resolve scripts not only for external targets but also for `logan`-enabled DBCS/Exadata targets;
+  - `generate-logan-payloads` now emits the same Management Agent packet directly inside each Log Analytics target directory as:
+    - `03-create-logan-management-agent-install-key.sh`
+    - `04-install-logan-management-agent.sh`
+    - `05-verify-logan-management-agent.sh`
+    - `06-resolve-logan-management-agent.sh`
+    - `11-resolve-logan-management-agent-package-url.sh`
+  - the same generators now emit an operator-side Ansible bundle for Linux collector installs:
+    - `generate-agent-scripts`: `<target>-agent-resolve-package-url.sh`, `<target>-agent-ansible-bootstrap.sh`, `<target>-agent-ansible-run.sh`, `<target>-agent-ansible-playbook.yml`, `<target>-agent-ansible.cfg`
+    - `generate-logan-payloads`: `07-bootstrap-logan-management-agent-ansible.sh`, `08-run-logan-management-agent-ansible.sh`, `09-logan-management-agent-playbook.yml`, `10-logan-management-agent-ansible.cfg`
+  - generated install-key retrieval now uses the current OCI CLI flag `--install-key-id`.
+  - generated host install and Ansible wrapper scripts accept either a local `AGENT_RPM` file or an OCI-resolved HTTPS `AGENT_RPM_URL`; remote downloads also require `AGENT_RPM_SHA256` and are verified before installation.
+  - generated response/install-key files use private permissions, and temporary response files are removed on exit (including the Ansible remote install path).
+- Purpose:
+  - remove the manual OCI CLI/install-key/install/lookup steps from the demo setup path;
+  - provide the same install path through either direct host execution or an operator-side Ansible run through a jumphost;
+  - ensure the Management Agent is configured with the required plugin set and the operator has a repeatable way to resolve the resulting agent OCID back into ignored config.
+- Validation:
+  - targeted CLI/log analytics tests were updated and passed;
+  - generated shell scripts were rendered locally and syntax-checked with `bash -n`.
+
+### Operator guidance now encoded in the project
+
+- `KB.md`: this error/solution map.
+- `README.md`, `docs/demo-db-incident-e2e.md`, `docs/db-incident-troubleshooting.md`:
+  - document `DB_INCIDENT_PDB_NAME`, `DB_INCIDENT_PDB_SERVICE`, and `DB_INCIDENT_LAB_EZCONNECT`;
+  - call out that `DB_INCIDENT_LAB_EZCONNECT` is the preferred DB-host execution path;
+  - state that Log Analytics scenario searches can lag behind a completed DB-side run.
+
 ## 2026-06-04 CAP DBM/OPSI End-To-End Enablement
 
 ### OCI CLI database discovery parser failure
@@ -493,3 +846,102 @@ where grantee = 'DBSNMP'
 - Console URL bases (eu-frankfurt-1): DB systems `cloud.oracle.com/dbaas/dbsystems`.
   (The Database Management / Ops Insights SPA routes are not the obvious
   `/dbmgmt` or `/opsi`; navigate via the console menu rather than guessing.)
+
+### Disposable Terraform VCN rejected with `400 Invalid tags`
+
+- Symptom: OCI rejects `oci_core_vcn` creation with `400-InvalidParameter,
+  Invalid tags` before any network resource is created.
+- Root cause: this tenancy rejects dotted freeform tag keys such as
+  `dbman-opsi.lifecycle`.
+- Fix: use OCI-compatible underscore keys consistently across all lifecycle
+  resources: `dbman_opsi_lifecycle`, `dbman_opsi_disposable`, and
+  `dbman_opsi_evidence_retain`. Re-plan before retrying; the failed request does
+  not need cleanup.
+
+### DBCS launch rejected because `sshPublicKeys[0]` has invalid type
+
+- Symptom: `LaunchDbSystem` returns `400 InvalidParameter` and identifies an SSH
+  key beginning with `[` as invalid.
+- Root cause: local `.env` supplied a bracketed SSH key value which was wrapped a
+  second time as a Terraform list, yielding a literal `"[ssh-rsa ...]"` value.
+- Fix: normalize the local value exactly once to a Terraform JSON list of public
+  keys. Never log the key or place it in committed tfvars.
+
+### Bastion create response contains a work-request ID, not the Bastion ID
+
+- Symptom: `bastion session create-managed-ssh` fails `NotAuthorizedOrNotFound`
+  when passed the ID captured from `bastion bastion create --query data.id`.
+- Root cause: the asynchronous create response exposes a `bastionworkrequest`
+  identifier at that path, not the active `bastion` resource identifier.
+- Fix: wait for the work request, then resolve the active Bastion through
+  `bastion bastion list` (or the work-request resource metadata) and use that
+  resource ID for all session operations. Keep work-request and resource IDs in
+  separate transient variables.
+
+### OCI list APIs can return empty or stall during asynchronous provisioning
+
+- Symptom: filtered `compute instance`, `bastion`, or OPSI list calls may return
+  empty output or exceed normal response time immediately after create.
+- Fix: use bounded OCI connection/read timeouts, then query the specific resource
+  ID once it is known. Do not submit another create while Terraform/state or a
+  work request is active. Treat an empty list as inconclusive, not as absence.
+
+### Managed SSH Bastion session rejects a newly launched jump host
+
+- Symptom: `create-managed-ssh` returns `InvalidParameter` stating that the
+  Bastion plugin must be enabled on the target instance.
+- Root cause: Oracle Cloud Agent plugin configuration on a newly launched image
+  did not have the Bastion plugin available/running yet.
+- Fix: enable Oracle Cloud Agent with management/monitoring/plugins enabled,
+  wait for plugin startup, then retry. If the plugin control plane remains
+  unreliable, use a Bastion **port-forwarding** session instead; it does not
+  require the Managed SSH plugin.
+
+### Bastion port-forward command contains two local placeholders
+
+- Symptom: executing OCI-provided SSH metadata fails with
+  `bash: localPort: No such file or directory` or a missing identity file.
+- Root cause: port-forward metadata contains both `<privateKey>` and
+  `<localPort>` placeholders. Shell parameter substitution can also drop a
+  leading slash when the replacement starts with `/`.
+- Fix: use a temporary session-specific SSH key, replace both placeholders, and
+  preserve an absolute private-key path. Use a dedicated temporary known-hosts
+  file with `StrictHostKeyChecking=accept-new`; never disable host-key checking
+  globally or write session keys into the repository.
+
+### Resource Manager public-schema gate rejects sensitive-word descriptions
+
+- Symptom: `test_resource_manager_schema_exists_for_public_stack` fails when
+  `schema.yaml` contains the word `password`, even in explanatory text.
+- Root cause: the public-stack readiness gate intentionally bans credential-like
+  terms from the Resource Manager input surface to prevent a stack from inviting
+  secret input.
+- Fix: keep the schema credential-free and use neutral wording such as
+  “plaintext credential values”; route all secret values through Vault and
+  ignored local runtime configuration.
+
+### Bastion port-forward SSH returns `Permission denied (publickey)` after creation
+
+- Symptom: OCI-provided SSH metadata reaches the Bastion, but authentication
+  fails even with the matching session private key.
+- Root cause: inspect the specific session before debugging key material. A
+  session can already be `DELETED`; its retained metadata is not usable for a
+  new connection.
+- Fix: create a fresh port-forward session with a fresh temporary public key,
+  poll `bastion session get` until `ACTIVE`, and only then run its generated SSH
+  metadata command with the matching private key. Do not reuse metadata from a
+  deleted session.
+
+### Disposable cleanup queries the wrong OCI region
+
+- Symptom: a resource known to exist in the selected deployment region returns
+  `NotAuthorizedOrNotFound`, or cleanup appears to make no progress.
+- Root cause: the OCI CLI profile has a default home region while the disposable
+  stack was deployed in another selected region. A bare `oci` command silently
+  uses that profile default.
+- Fix: every demo operation passes the selected `--profile` and `--region`; the
+  incident runner now derives those values from the local target config and
+  stops before making OCI changes when the environment region differs from the
+  target config. The disposable Bastion runner also requires a lifecycle ID and
+  matches both the display name and lifecycle tag, so it cannot select a
+  similarly named resource from another demo run.

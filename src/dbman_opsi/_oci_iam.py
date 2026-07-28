@@ -8,6 +8,19 @@ from dbman_opsi._oci_base import _OciBase
 
 
 class IamCommands(_OciBase):
+    def list_subscribed_regions(self, tenancy_id: str) -> list[dict[str, Any]]:
+        """List the tenancy's subscribed OCI regions without changing state."""
+
+        data = self.run_json([
+            "iam",
+            "region-subscription",
+            "list",
+            "--tenancy-id",
+            tenancy_id,
+            "--all",
+        ])
+        return self._items(data)
+
     def list_compartments(self, tenancy_id: str) -> list[dict[str, Any]]:
         data = self.run_json([
             "iam",
@@ -19,6 +32,7 @@ class IamCommands(_OciBase):
             "true",
             "--access-level",
             "ACCESSIBLE",
+            "--all",
         ])
         return self._items(data)
 

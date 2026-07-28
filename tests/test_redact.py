@@ -38,3 +38,15 @@ def test_redacts_data_safe_and_pluggable_database_ocids() -> None:
 
     assert "ocid1" + "." not in redacted
     assert redacted.count("<OCI_OCID>") == 4
+
+
+def test_redacts_log_analytics_and_adb_collection_shapes() -> None:
+    entity = "ocid1" + ".loganalyticsentity.oc1.eu-frankfurt-1.aaaaexample"
+    agent = "ocid1" + ".managementagent.oc1.eu-frankfurt-1.bbbbexample"
+    text = f"{entity} {agent} /Users/alice/Wallet_DEMO demo.adb.eu-frankfurt-1.oraclecloud.com"
+
+    redacted = redact_text(text)
+
+    assert "ocid1" + "." not in redacted
+    assert "Wallet_DEMO" not in redacted
+    assert "oraclecloud.com" not in redacted

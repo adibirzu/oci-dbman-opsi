@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Callable
 
 from dbman_opsi.config import EnablementConfig, Target
+from dbman_opsi.log_analytics import LogAnalyticsService
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.status import dbm_status, opsi_status
+
+
+@dataclass(frozen=True)
+class ServiceCollectionProof:
+    """Bounded, per-service observation proof; control-plane state is not proof."""
+
+    service: str
+    target: str
+    observed_at: datetime | None
+    status: str
+    source: str
+
+    @property
+    def collecting(self) -> bool:
+        return self.status == "collecting" and self.observed_at is not None
 
 
 class ValidationService:
@@ -61,8 +79,46 @@ class ValidationService:
                 findings.append(
                     f"{target.name}{region_suffix}: validate Database Management and Ops Insights status in OCI Console/API"
                 )
+        if any(target.wants("logan") for target in config.targets):
+            findings.extend(LogAnalyticsService(self.oci).validation_findings(config))
         return findings
 
+    def collection_proofs(self, config: EnablementConfig, *, max_age_seconds: int = 900) -> tuple[ServiceCollectionProof, ...]:
+        """Return freshness-qualified service proofs without inventing samples.
+
+        The OCI facade may expose bounded collection/usage observation methods.
+        Older facades safely return ``absent`` rather than converting ACTIVE or
+        ENABLED control-plane state into a collection claim.
+        """
+        now = datetime.now(UTC)
+        proofs: list[ServiceCollectionProof] = []
+        for target in config.targets:
+            oci = self.oci_for_region(target.region or config.region)
+            for service in target.services:
+                if service == "dbm":
+                    raw = self._observation(oci, "get_dbm_collection_observation", target.resource_id)
+                elif service == "opsi":
+                    raw = self._observation(oci, "get_opsi_collection_observation", target.opsi_database_insight_id or target.resource_id)
+                elif service == "logan":
+                    raw = self._observation(oci, "get_log_analytics_collection_observation", target.logan_database_entity_id or target.resource_id)
+                else:
+                    continue
+                observed = _observation_time(raw)
+                status = "absent" if observed is None else "collecting"
+                if observed is not None and (now - observed).total_seconds() > max_age_seconds:
+                    status = "stale"
+                proofs.append(ServiceCollectionProof(service, target.name, observed, status, "oci-query"))
+        return tuple(proofs)
+
+    @staticmethod
+    def _observation(oci: OciCli, method: str, resource_id: str | None) -> object:
+        getter = getattr(oci, method, None)
+        if getter is None or not resource_id:
+            return None
+        try:
+            return getter(resource_id)
+        except RuntimeError:
+            return None
     def _opsi_insight_state(self, target: "Target", config: EnablementConfig, oci: OciCli) -> str:
         """Resolve the real OPSI Database Insight lifecycle for a DBCS/Exadata target.
 
@@ -72,12 +128,12 @@ class ValidationService:
         Ops Insights collection is surfaced instead of hidden behind a generic
         "needs validation" message.
 
-        The cap OPSI ``database-insights list`` control plane is *unreliable*: it
+        The demo OPSI ``database-insights list`` control plane is *unreliable*: it
         flaps between the full set, a partial set, and an exit-0 empty list (and
         sometimes ``NotAuthorizedOrNotFound``) for the same compartment, call to
-        call (see KB / runbook "Known cap quirk"). A single-resource
+        call (see KB / runbook "Known demo-tenancy quirk"). A single-resource
         ``database-insights get`` by insight OCID, by contrast, is reliable
-        (10/10 in cap). So:
+        (10/10 in demo). So:
 
         1. If the insight OCID is known (``target.opsi_database_insight_id`` in
            config, or discovered from a positive list hit), read state with the
@@ -184,3 +240,19 @@ class ValidationService:
                 status = detail.get("status") or "UNKNOWN"
                 return f"{state} ({status})"
         return None
+
+
+def _observation_time(value: object) -> datetime | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("observation-time", "observation_time", "time-collected", "time_collected", "timestamp"):
+        raw = value.get(key)
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(raw, tz=UTC)
+        if isinstance(raw, str):
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            except ValueError:
+                continue
+    return None
