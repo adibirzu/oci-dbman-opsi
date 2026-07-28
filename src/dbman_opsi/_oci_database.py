@@ -56,10 +56,52 @@ class DatabaseCommands(_OciBase):
         return self._items(data)
 
     def list_databases(self, compartment_id: str, db_system_id: str) -> list[dict[str, Any]]:
-        return self._list_database_pages(compartment_id, "dbSystemId", db_system_id)
+        return self._list_databases_by_homes(
+            compartment_id,
+            db_system_id=db_system_id,
+        )
 
     def list_databases_for_vm_cluster(self, compartment_id: str, vm_cluster_id: str) -> list[dict[str, Any]]:
-        return self._list_database_pages(compartment_id, "vmClusterId", vm_cluster_id)
+        return self._list_databases_by_homes(
+            compartment_id,
+            vm_cluster_id=vm_cluster_id,
+        )
+
+    def list_databases_for_db_home(self, compartment_id: str, db_home_id: str) -> list[dict[str, Any]]:
+        return self._list_database_pages(compartment_id, "dbHomeId", db_home_id)
+
+    def _list_databases_by_homes(
+        self,
+        compartment_id: str,
+        *,
+        db_system_id: str | None = None,
+        vm_cluster_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Enumerate every DB home, then page ListDatabases at its native grain.
+
+        The generated CLI exposes DB-system and VM-cluster convenience flags,
+        while the REST API's reliable pageable filter is ``dbHomeId``.
+        """
+
+        homes = self.list_db_homes(
+            compartment_id,
+            db_system_id=db_system_id,
+            vm_cluster_id=vm_cluster_id,
+        )
+        seen_ids: set[str] = set()
+        databases: list[dict[str, Any]] = []
+        for home in homes:
+            home_id = home.get("id")
+            if not isinstance(home_id, str) or not home_id:
+                continue
+            for database in self.list_databases_for_db_home(compartment_id, home_id):
+                database_id = database.get("id")
+                if isinstance(database_id, str) and database_id:
+                    if database_id in seen_ids:
+                        continue
+                    seen_ids.add(database_id)
+                databases.append(database)
+        return databases
 
     def _list_database_pages(
         self,

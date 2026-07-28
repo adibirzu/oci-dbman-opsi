@@ -745,7 +745,14 @@ def _lifecycle_plan(args: argparse.Namespace, ctx: _CliContext) -> tuple[FleetPl
     targets = tuple(_materialize_monitoring_target(_bind_target(target, bindings), answers) for target in targets)
     _validate_credential_bindings(targets, answers)
     targets = tuple(_apply_answer_controls(target, answers) for target in targets)
-    return FleetPlan(profile=args.profile, region=args.region, targets=targets, deployment_mode=answers.deployment_mode, credential_policy=answers.credential_policy, discovery_scope=DiscoveryScope(subscribed_regions=discovery.regions, accessible_compartments=tuple(compartment_id for compartment_id, _name in discovery.compartments), include_regions=selection.regions, exclude_regions=(), include_compartments=selection.compartments, exclude_compartments=()), prerequisite_actions=tuple(sorted({"VAULT_ENDPOINTS" if "dbm" in target.services else "" for target in targets} - {""})), risk_codes=("RISK_OWNER_APPROVAL",), estimated_resource_counts={service: sum(service in target.services for target in targets) for service in answers.services}, settings={
+    prerequisite_actions = {"VAULT_ENDPOINTS" if "dbm" in target.services else "" for target in targets}
+    if "logan" in answers.services and any(target.settings.get("logan_onboard_namespace") for target in targets):
+        prerequisite_actions.add("LOG_ANALYTICS_NAMESPACE")
+    prerequisite_actions.discard("")
+    risk_codes = {"RISK_OWNER_APPROVAL"}
+    if "LOG_ANALYTICS_NAMESPACE" in prerequisite_actions:
+        risk_codes.add("RISK_LOGAN_NAMESPACE_ONBOARDING")
+    return FleetPlan(profile=args.profile, region=args.region, targets=targets, deployment_mode=answers.deployment_mode, credential_policy=answers.credential_policy, discovery_scope=DiscoveryScope(subscribed_regions=discovery.regions, accessible_compartments=tuple(compartment_id for compartment_id, _name in discovery.compartments), include_regions=selection.regions, exclude_regions=(), include_compartments=selection.compartments, exclude_compartments=()), prerequisite_actions=tuple(sorted(prerequisite_actions)), risk_codes=tuple(sorted(risk_codes)), estimated_resource_counts={service: sum(service in target.services for target in targets) for service in answers.services}, settings={
         "services": answers.services, "log_preset": answers.log_preset.value, "retention_days": answers.retention_days,
         "authority_mode": answers.authority_mode.value, "max_concurrency": answers.max_concurrency,
         "provision_test_dbcs": answers.provision_test_dbcs, "provision_test_autonomous": answers.provision_test_autonomous,
@@ -1679,12 +1686,12 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, ConfigError) as exc:
         if args.command not in {"onboard", "resume", "import-handoff", "import-cleanup-handoff", "import-collection-evidence", "fleet-status", "offboard"}:
             raise
-        print(str(exc), file=sys.stderr)
+        print(redact_text(str(exc)), file=sys.stderr)
         return 5
     except KeyError as exc:
         if args.command not in {"onboard", "resume", "import-handoff", "import-cleanup-handoff", "import-collection-evidence", "fleet-status", "offboard"}:
             raise
-        print(str(exc), file=sys.stderr)
+        print(redact_text(str(exc)), file=sys.stderr)
         return 6
 
 

@@ -84,6 +84,30 @@ def test_onboard_incomplete_discovery_is_redacted_and_blocked(monkeypatch, capsy
     assert "<OCI_OCID>" in output.err
 
 
+def test_onboard_value_errors_are_redacted_at_the_cli_boundary(monkeypatch, capsys) -> None:
+    raw_target = "ocid1.database.oc1..private-target"
+
+    def blocked(*_args):
+        raise ValueError(f"selected target {raw_target} has an invalid dependency")
+
+    monkeypatch.setattr("dbman_opsi.cli._lifecycle_plan", blocked)
+
+    assert main(
+        [
+            "onboard",
+            "--region",
+            "eu-frankfurt-1",
+            "--answers",
+            "unused.yaml",
+            "--non-interactive",
+            "--plan-only",
+        ]
+    ) == 5
+    output = capsys.readouterr()
+    assert raw_target not in output.err
+    assert "<OCI_OCID>" in output.err
+
+
 def test_status_emits_redacted_json_for_saved_run(tmp_path: Path, capsys) -> None:
     target_id = "ocid1.database.oc1..private-target"
     plan = FleetPlan("DEFAULT", "eu-frankfurt-1", (TargetPlan(target_id, "private-name", "dbcs", "eu-frankfurt-1"),))

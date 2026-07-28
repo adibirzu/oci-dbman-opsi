@@ -11,6 +11,7 @@ from typing import Any
 
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.redact import redact_text
+from dbman_opsi.runner import OciAuthError
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status, opsi_status
 
 
@@ -260,6 +261,9 @@ class FleetDiscovery:
             return (), [DiscoveryFinding("compartments", error)]
         seen: dict[str, str] = {tenancy_id: tenancy_id}
         for record in records:
+            lifecycle_state = _value(record, "lifecycle-state")
+            if lifecycle_state and lifecycle_state.upper() != "ACTIVE":
+                continue
             if isinstance(record, Mapping) and (identifier := _value(record, "id")):
                 seen.setdefault(identifier, _value(record, "name", "display-name") or identifier)
         return tuple(sorted(seen.items())), []
@@ -410,7 +414,10 @@ class FleetDiscovery:
             return targets
         insights, insight_error = self._opsi_insights(client, compartment_id)
         safe_targets, safe_error = self._call(client, "list_data_safe_targets", compartment_id)
-        entities, associated_entities, log_error = self._log_entities(client, compartment_id)
+        entities, associated_entities, log_error, log_namespace_onboarding_required = self._log_entities(
+            client,
+            compartment_id,
+        )
         for scope, error in (("opsi", insight_error), ("datasafe", safe_error), ("logan", log_error)):
             if error:
                 findings.append(DiscoveryFinding(f"{region}/{compartment_id}/{scope}", error))
@@ -433,7 +440,10 @@ class FleetDiscovery:
                     service_name=target.name if role == "PDB" else None,
                 )
             states["logan"] = "UNKNOWN" if log_error else _logan_state(entities, associated_entities, target)
-            enriched.append(replace(target, service_states=states))
+            settings = dict(target.settings)
+            if log_namespace_onboarding_required:
+                settings["logan_onboard_namespace"] = True
+            enriched.append(replace(target, service_states=states, settings=settings))
         return enriched
 
     def _opsi_insights(self, client: OciCli, compartment_id: str) -> tuple[list[dict[str, Any]], str | None]:
@@ -454,16 +464,26 @@ class FleetDiscovery:
         self,
         client: OciCli,
         compartment_id: str,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, bool]:
         namespace_method = getattr(client, "get_log_analytics_namespace", None)
         entity_method = getattr(client, "list_log_analytics_entities", None)
         if not callable(namespace_method) or not callable(entity_method):
-            return [], [], None
-        namespace, error = _read(lambda: namespace_method(compartment_id), "")
-        if error:
-            return [], [], error
+            return [], [], None, False
+        try:
+            namespace = namespace_method(compartment_id)
+        except OciAuthError as exc:
+            # OCI deliberately uses NotAuthorizedOrNotFound when a subscribed
+            # region has not yet been onboarded to Log Analytics. Treat that
+            # state as an approval-gated regional prerequisite. The eventual
+            # onboard call remains authoritative and will still fail closed if
+            # the caller genuinely lacks permission.
+            if "NotAuthorizedOrNotFound" in str(exc):
+                return [], [], None, True
+            return [], [], str(exc), False
+        except Exception as exc:
+            return [], [], str(exc), False
         if not namespace:
-            return [], [], "Log Analytics namespace was empty"
+            return [], [], None, True
         entities, entity_error = self._call(client, "list_log_analytics_entities", str(namespace), compartment_id)
         associations, association_error = self._call(
             client,
@@ -471,7 +491,7 @@ class FleetDiscovery:
             str(namespace),
             compartment_id,
         )
-        return entities, associations, entity_error or association_error
+        return entities, associations, entity_error or association_error, False
 
     @staticmethod
     def _target(
