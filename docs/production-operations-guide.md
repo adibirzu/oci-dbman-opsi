@@ -164,7 +164,9 @@ plan-only. Record the exact printed plan ID in the approved change record.
 dbman-opsi onboard --region <REGION> \
   --answers fleet-answers.local.yaml --non-interactive \
   --approval <EXACT_PLAN_ID> \
-  --state .fleet-state/fleet.sqlite
+  --state .fleet-state/fleet.sqlite \
+  --handoff-key .fleet-state/handoff.key \
+  --handoff-dir generated/fleet-handoffs
 ```
 
 The executor checkpoints prerequisite, credential/endpoint, DB/host handoff,
@@ -177,7 +179,9 @@ continuing writes under an invalid identity.
 
 ```bash
 dbman-opsi resume --region <REGION> --run-id <RUN_ID> \
-  --approval <EXACT_PLAN_ID> --state .fleet-state/fleet.sqlite
+  --approval <EXACT_PLAN_ID> --state .fleet-state/fleet.sqlite \
+  --handoff-key .fleet-state/handoff.key \
+  --handoff-dir generated/fleet-handoffs
 dbman-opsi fleet-status --region <REGION> --run-id <RUN_ID> \
   --state .fleet-state/fleet.sqlite --json
 ```
@@ -186,6 +190,12 @@ dbman-opsi fleet-status --region <REGION> --run-id <RUN_ID> \
 only when its current collection observation/proof is present. OPSI propagation
 may take up to 24 hours. Use a signed, redacted per-service collection envelope
 when the bounded OCI observation is unavailable:
+
+After remediating a non-authorization failure, add `--retry-failed` to `resume`
+to reopen failed phases and their dependency-blocked children for the same exact
+plan. This is explicit because a normal resume never replays terminal failures or
+completed phases. Authorization blocks remain closed until identity/policy
+authority is corrected.
 
 ```bash
 dbman-opsi import-collection-evidence --region <REGION> --run-id <RUN_ID> \

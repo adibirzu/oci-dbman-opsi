@@ -9,7 +9,7 @@ from dbman_opsi.fleet_discovery import (
     FleetDiscoveryResult,
 )
 from dbman_opsi.oci_cli import OciCli
-from dbman_opsi.runner import CommandResult
+from dbman_opsi.runner import CommandResult, OciAuthError
 
 
 class _MultiRegionOci:
@@ -143,6 +143,24 @@ def test_failed_scope_enumeration_is_explicit_and_cannot_emit_a_complete_target_
     assert result.findings[0].scope == "regions"
     with pytest.raises(DiscoveryScopeError, match="incomplete"):
         discovery.discover()
+
+
+def test_discovery_excludes_explicitly_inactive_compartments() -> None:
+    class _LifecycleCompartments(_ManyTargetOci):
+        def list_compartments(self, _tenancy_id: str) -> list[dict[str, str]]:
+            return [
+                {"id": "active", "name": "active", "lifecycle-state": "ACTIVE"},
+                {"id": "deleted", "name": "deleted", "lifecycle-state": "DELETED"},
+            ]
+
+        def list_db_systems(self, compartment_id: str) -> list[dict[str, str]]:
+            assert compartment_id != "deleted"
+            return []
+
+    result = FleetDiscovery(_LifecycleCompartments(0)).discover_result()
+
+    assert result.complete
+    assert result.compartments == (("active", "active"), ("tenancy", "tenancy"))
 
 
 def test_incomplete_discovery_error_redacts_scope_identifiers() -> None:
@@ -298,6 +316,31 @@ def test_incomplete_opsi_join_marks_scope_incomplete_instead_of_claiming_not_ena
     assert not result.complete
     assert any(finding.scope.endswith("/opsi") for finding in result.findings)
     assert {target.service_states["opsi"] for target in result.targets} == {"UNKNOWN"}
+
+
+def test_unonboarded_log_analytics_namespace_becomes_a_target_prerequisite() -> None:
+    class _UnonboardedLogAnalytics(_JoinedStateOci):
+        def get_log_analytics_namespace(self, _compartment_id: str) -> str:
+            raise OciAuthError("NotAuthorizedOrNotFound")
+
+    result = FleetDiscovery(_UnonboardedLogAnalytics()).discover_result()
+
+    assert result.complete
+    assert result.targets
+    assert {target.service_states["logan"] for target in result.targets} == {"NOT_ENABLED"}
+    assert all(target.settings["logan_onboard_namespace"] is True for target in result.targets)
+
+
+def test_non_namespace_log_analytics_authorization_error_remains_blocking() -> None:
+    class _UnauthorizedLogAnalytics(_JoinedStateOci):
+        def get_log_analytics_namespace(self, _compartment_id: str) -> str:
+            raise OciAuthError("authorization failed")
+
+    result = FleetDiscovery(_UnauthorizedLogAnalytics()).discover_result()
+
+    assert not result.complete
+    assert any(finding.scope.endswith("/logan") for finding in result.findings)
+    assert {target.service_states["logan"] for target in result.targets} == {"UNKNOWN"}
 
 
 def test_discovery_reads_db_home_topology_but_lists_databases_by_db_system() -> None:

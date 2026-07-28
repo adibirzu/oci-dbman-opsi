@@ -73,3 +73,40 @@ def test_selection_file_ids_are_deduplicated_for_csv_and_yaml(tmp_path: Path, fi
 
 def test_selection_requires_explicit_ids_when_all_discovered_is_disabled() -> None:
     assert select_targets((_target("a"),), TargetSelection(all_discovered=False)) == ()
+
+
+def test_selected_pdb_automatically_includes_its_discovered_cdb_parent() -> None:
+    cdb = _target("cdb", state="updating")
+    pdb = DiscoveredTarget(
+        target_id="pdb",
+        name="pdb",
+        kind="dbcs",
+        region="eu-frankfurt-1",
+        compartment_id="compartment-a",
+        lifecycle_state="AVAILABLE",
+        parent_cdb_id="cdb",
+        settings={"database_role": "PDB", "database_family": "dbcs"},
+    )
+
+    selected = select_targets(
+        (pdb, cdb),
+        TargetSelection(lifecycle_states=("available",)),
+    )
+
+    assert {target.target_id for target in selected} == {"cdb", "pdb"}
+
+
+def test_explicitly_excluded_cdb_cannot_be_silently_readded_for_a_pdb() -> None:
+    cdb = _target("cdb")
+    pdb = DiscoveredTarget(
+        target_id="pdb",
+        name="pdb",
+        kind="dbcs",
+        region="eu-frankfurt-1",
+        compartment_id="compartment-a",
+        parent_cdb_id="cdb",
+        settings={"database_role": "PDB", "database_family": "dbcs"},
+    )
+
+    with pytest.raises(ValueError, match="explicitly excluded CDB"):
+        select_targets((pdb, cdb), TargetSelection(exclude_target_ids=("cdb",)))

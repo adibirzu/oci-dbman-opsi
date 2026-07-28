@@ -30,7 +30,7 @@ class FakeOci:
             self.run(args)
             return True
         except RuntimeError as exc:
-            if any(marker in str(exc) for marker in tolerated):
+            if any(marker.lower() in str(exc).lower() for marker in tolerated):
                 return False
             raise
 
@@ -55,6 +55,7 @@ def test_enable_autonomous_invokes_opsi_command() -> None:
     service.enable_target(target)
 
     assert oci.commands[0][:3] == ["db", "autonomous-database", "enable-autonomous-database-management"]
+    assert oci.commands[1][:3] == ["db", "autonomous-database", "enable-operations-insights"]
 
 
 def test_enable_autonomous_invokes_database_management_when_configured() -> None:
@@ -71,6 +72,42 @@ def test_enable_autonomous_invokes_database_management_when_configured() -> None
 
     assert len(oci.commands) == 2
     assert oci.commands[1][:3] == ["opsi", "database-insights", "enable-autonomous-database"]
+
+
+def test_enable_autonomous_tolerates_database_management_already_enabled() -> None:
+    oci = FakeOci(
+        fail_on_index=0,
+        fail_text="InvalidParameter: Database Management is already enabled.",
+    )
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="autonomous",
+        name="adb",
+        resource_id="autonomous-database-id",
+    )
+
+    assert service.enable_dbm(target) is False
+    assert len(oci.commands) == 1
+
+
+def test_enable_autonomous_opsi_tolerates_already_enabled() -> None:
+    oci = FakeOci(
+        fail_on_index=0,
+        fail_text="IncorrectState: Operations Insights is already enabled.",
+    )
+    service = EnablementService(oci)  # type: ignore[arg-type]
+    target = Target(
+        kind="autonomous",
+        name="adb",
+        resource_id="autonomous-database-id",
+    )
+
+    assert service.enable_opsi(target) is False
+    assert oci.commands[0][:3] == [
+        "db",
+        "autonomous-database",
+        "enable-operations-insights",
+    ]
 
 
 def test_enable_cloud_database_invokes_dbmgmt_and_opsi_commands() -> None:
