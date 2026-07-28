@@ -97,18 +97,31 @@ def select_targets(
     targets: Iterable[DiscoveredTarget],
     selection: TargetSelection = TargetSelection(),
 ) -> tuple[DiscoveredTarget, ...]:
-    """Apply all selection rules and return a deterministic, duplicate-free set."""
+    """Apply selection rules and retain every selected PDB's discovered CDB."""
 
+    materialized = tuple(targets)
+    by_id = {target.target_id: target for target in materialized}
     included = set(selection.target_ids)
     excluded = set(selection.exclude_target_ids)
     matched: dict[str, DiscoveredTarget] = {}
-    for target in sorted(targets, key=_target_sort_key):
+    for target in sorted(materialized, key=_target_sort_key):
         if target.target_id in excluded:
             continue
         if not selection.all_discovered and target.target_id not in included:
             continue
         if _matches(target, selection):
             matched.setdefault(target.target_id, target)
+    for target in tuple(matched.values()):
+        if str(target.settings.get("database_role", "CDB")).upper() != "PDB":
+            continue
+        parent_id = target.parent_cdb_id or target.settings.get("parent_cdb_id")
+        if not parent_id or str(parent_id) not in by_id:
+            continue
+        if str(parent_id) in excluded:
+            raise ValueError(
+                f"selected PDB {target.target_id} requires explicitly excluded CDB {parent_id}"
+            )
+        matched.setdefault(str(parent_id), by_id[str(parent_id)])
     return tuple(sorted(matched.values(), key=_target_sort_key))
 
 

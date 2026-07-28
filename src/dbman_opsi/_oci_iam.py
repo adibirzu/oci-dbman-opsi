@@ -32,6 +32,8 @@ class IamCommands(_OciBase):
             "true",
             "--access-level",
             "ACCESSIBLE",
+            "--lifecycle-state",
+            "ACTIVE",
             "--all",
         ])
         return self._items(data)
