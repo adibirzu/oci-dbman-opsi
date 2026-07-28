@@ -1,4 +1,8 @@
+import os
 from pathlib import Path
+import subprocess
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +92,68 @@ def test_resource_manager_publication_workflow_is_fail_closed() -> None:
     assert "*.tfstate" in build_script
     assert ".terraform" in build_script
     assert "terraform.tfvars" in build_script
+
+
+def test_resource_manager_publication_step_handles_empty_orphan_worktree(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    remote = tmp_path / "remote.git"
+    package = tmp_path / "package"
+    repository.mkdir()
+    package.mkdir()
+    (repository / "tracked.txt").write_text("source checkout\n", encoding="utf-8")
+    (package / "main.tf").write_text("terraform {}\n", encoding="utf-8")
+
+    def git(*args: str, cwd: Path = repository) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Test Operator")
+    git("config", "user.email", "operator@example.invalid")
+    git("add", "tracked.txt")
+    git("commit", "-m", "test source")
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    git("remote", "add", "origin", str(remote))
+
+    workflow = yaml.safe_load(read(".github/workflows/resource-manager-stack.yml"))
+    publish_steps = workflow["jobs"]["publish-package-branch"]["steps"]
+    publish_script = next(
+        step["run"]
+        for step in publish_steps
+        if step.get("name") == "Publish generated branch"
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", publish_script],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PACKAGE_DIR": str(package),
+            "GITHUB_SHA": "0123456789abcdef",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    published = git(
+        "--git-dir",
+        str(remote),
+        "show",
+        "resource-manager-stack:main.tf",
+    )
+    assert published.stdout == "terraform {}\n"
 
 
 def test_gitignore_excludes_public_repo_local_artifacts() -> None:

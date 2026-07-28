@@ -98,7 +98,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch --orphan resource-manager-stack
-          git rm -rf .
+          git rm -rf --ignore-unmatch .
           cp -R "${PACKAGE_DIR}/." .
           git add .
           git commit -m "build: publish Resource Manager stack from ${GITHUB_SHA}"
