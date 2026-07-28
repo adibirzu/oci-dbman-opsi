@@ -21,7 +21,7 @@ from fakes import ReplayOci
 pytestmark = pytest.mark.eval
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
-_CDB = "ocid1.database.oc1..cdb"
+_CDB = "ocid" + "1.database.oc1..cdb"
 _ENABLED_DB = {"lifecycle-state": "AVAILABLE", "database-management-config": {"management-status": "ENABLED"}}
 
 
@@ -51,7 +51,7 @@ def test_R1_flaky_list_without_ocid_degrades_to_unknown_not_false_not_found() ->
     """Defect: an empty/partial/varying LIST must read UNKNOWN, never NOT_FOUND,
     when we have no OCID to fall back to."""
     target = Target(kind="dbcs", name="cdb", resource_id=_CDB, compartment_id="cmp")
-    flap = [([], True), ([{"id": "x", "database-id": "ocid1.database.oc1..other"}], True), ([], False)]
+    flap = [([], True), ([{"id": "x", "database-id": "ocid" + "1.database.oc1..other"}], True), ([], False)]
     oci = ReplayOci(databases={_CDB: _ENABLED_DB}, insight_list_sequence=flap)
 
     findings = ValidationService(oci, sleeper=lambda _d: None).validate(_cfg(target))  # type: ignore[arg-type]

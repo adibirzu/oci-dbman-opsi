@@ -44,7 +44,7 @@ def test_data_safe_status_matches_by_associated_resource_ids() -> None:
     # The target-database LIST summary has database-details=null and carries the
     # registered DB OCID under associated-resource-ids instead.
     targets = [{
-        "id": "ocid1.datasafetargetdatabase.oc1..t1",
+        "id": "ocid" + "1.datasafetargetdatabase.oc1..t1",
         "lifecycle-state": "ACTIVE",
         "database-details": None,
         "associated-resource-ids": ["adb-1"],

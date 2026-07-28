@@ -134,7 +134,6 @@ def test_generate_db_scripts_emits_data_safe_only_when_opted_in(tmp_path: Path) 
         ),
     )
     paths = generate_db_scripts(config, tmp_path)
-    names = {str(p) for p in paths}
     assert any(p.name == "06-enable-data-safe.sql" and p.parent.name == "with-ds" for p in paths)
     assert not (tmp_path / "without-ds" / "06-enable-data-safe.sql").exists()
     # README reflects the pillar opt-in.

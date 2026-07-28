@@ -34,6 +34,8 @@ class CredentialDecision:
     target: str
     status: str  # "set" | "skipped" | "blocked"
     detail: str
+    named_credential_id: str | None = None
+    created: bool = False
 
 
 class CredentialService:
@@ -73,8 +75,13 @@ class CredentialService:
                 f"{', '.join(PREFERRED_CREDENTIAL_NAMES)} already configured for {db_name}",
             )
 
+        credential_name = f"{db_name}_{target.monitoring_user}_NORMAL"
         try:
-            self._apply_with_retry(target, compartment, db_name, managed_id)
+            existing_credential_id = self._named_credential_id(compartment, credential_name)
+            if existing_credential_id:
+                self._set_preferred_credentials(managed_id, existing_credential_id)
+                return CredentialDecision(target.name, "set", f"{', '.join(PREFERRED_CREDENTIAL_NAMES)} reused existing named credential for {db_name}", named_credential_id=existing_credential_id)
+            named_credential_id = self._apply_with_retry(target, compartment, credential_name, managed_id)
         except RuntimeError as exc:
             return CredentialDecision(target.name, "blocked", self._blocked_detail(exc))
 
@@ -82,6 +89,8 @@ class CredentialService:
             target.name,
             "set",
             f"{', '.join(PREFERRED_CREDENTIAL_NAMES)} -> Vault named credential for {db_name}",
+            named_credential_id=named_credential_id,
+            created=True,
         )
 
     def _already_set(self, managed_id: str) -> bool:
@@ -104,22 +113,39 @@ class CredentialService:
             return all(statuses.get(name) == "SET" for name in PREFERRED_CREDENTIAL_NAMES)
         return False
 
-    def _apply_with_retry(self, target: Target, compartment: str, db_name: str, managed_id: str) -> None:
-        # The cap dbmgmt control plane intermittently returns NotAuthorizedOrNotFound
+    def _named_credential_id(self, compartment: str, name: str) -> str | None:
+        lister = getattr(self.oci, "list_named_credentials", None)
+        if lister is None:
+            return None
+        for credential in lister(compartment):
+            if credential.get("name") == name:
+                credential_id = credential.get("id")
+                if not isinstance(credential_id, str) or not credential_id:
+                    raise RuntimeError("existing named credential has no identifier")
+                return credential_id
+        return None
+
+    def _set_preferred_credentials(self, managed_id: str, named_credential_id: str) -> None:
+        for credential_name in PREFERRED_CREDENTIAL_NAMES:
+            self.oci.set_preferred_named_credential(managed_id, credential_name, named_credential_id)
+
+    def _apply_with_retry(self, target: Target, compartment: str, credential_name: str, managed_id: str) -> str:
+        # The demo dbmgmt control plane intermittently returns NotAuthorizedOrNotFound
         # (404); retry the whole credential set once before surfacing the error.
         last_error: RuntimeError | None = None
         for _ in range(2):
             try:
                 named_credential_id = self.oci.create_named_credential(
                     compartment_id=compartment,
-                    name=f"{db_name}_{target.monitoring_user}_NORMAL",
+                    name=credential_name,
                     user_name=target.monitoring_user or "DBSNMP",
                     password_secret_id=target.password_secret_id or "",
                     associated_resource=managed_id,
                 )
-                for credential_name in PREFERRED_CREDENTIAL_NAMES:
-                    self.oci.set_preferred_named_credential(managed_id, credential_name, named_credential_id)
-                return
+                if not named_credential_id:
+                    raise RuntimeError("named credential creation did not return an identifier")
+                self._set_preferred_credentials(managed_id, named_credential_id)
+                return named_credential_id
             except RuntimeError as exc:
                 last_error = exc
         raise last_error  # type: ignore[misc]

@@ -1,9 +1,11 @@
 .coverage
 .env.local
+.worktrees/
 .pytest_cache/
 __pycache__/
 *.py[cod]
 *.egg-info/
+dist/
 *.log
 .venv/
 .mcp.json
@@ -17,6 +19,8 @@ terraform/**/*.tfstate.*
 terraform/**/terraform.tfvars.json
 generated/
 runs/
+# Default local fleet lifecycle state. FleetStateStore also accepts an explicit path.
+.fleet-state/
 dbman-opsi*.yaml
 dbman-opsi*.json
 *.local.yaml
@@ -33,4 +37,3 @@ pytest-of-*/
 terraform/**/*.auto.tfvars.json
 terraform/**/*.auto.tfvars
 terraform/**/*.tfvars
-terraform/**/.terraform.lock.hcl

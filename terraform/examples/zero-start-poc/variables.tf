@@ -13,6 +13,34 @@ variable "region" {
   description = "OCI region."
 }
 
+variable "demo_lifecycle_id" {
+  type        = string
+  description = "Required project-owned lifecycle tag value used to discover and destroy only disposable demo resources."
+  default     = "dbman-opsi-disposable"
+}
+
+variable "evidence_retention_days" {
+  type        = number
+  description = "Retention target for sanitized Log Analytics evidence after teardown. OCI retention configuration is applied by the Log Analytics workflow."
+  default     = 7
+
+  validation {
+    condition     = var.evidence_retention_days == 7
+    error_message = "The disposable release retains sanitized evidence for exactly seven days."
+  }
+}
+
+variable "demo_services" {
+  type        = set(string)
+  description = "Demo pillars selected in Resource Manager: dbm, opsi, datasafe, logan. Database-side bootstrap is still required before enablement."
+  default     = ["dbm", "opsi", "datasafe", "logan"]
+
+  validation {
+    condition     = length(setsubtract(var.demo_services, toset(["dbm", "opsi", "datasafe", "logan"]))) == 0
+    error_message = "demo_services may contain only dbm, opsi, datasafe, and logan."
+  }
+}
+
 variable "create_test_network" {
   type        = bool
   description = "Create a PoC VCN/subnet."
@@ -34,13 +62,13 @@ variable "subnet_ocid" {
 variable "test_vcn_cidr" {
   type        = string
   description = "PoC VCN CIDR."
-  default     = "10.44.0.0/16"
+  default     = null
 }
 
 variable "test_subnet_cidr" {
   type        = string
   description = "PoC private subnet CIDR."
-  default     = "10.44.10.0/24"
+  default     = null
 }
 
 variable "create_vault" {
@@ -84,34 +112,67 @@ variable "create_identity_policy" {
 
 variable "targets" {
   type = list(object({
-    kind            = string
-    name            = string
-    resource_id     = optional(string)
-    provision       = bool
-    management_type = string
+    kind                      = string
+    name                      = string
+    resource_id               = optional(string)
+    provision                 = bool
+    management_type           = string
+    services                  = optional(list(string), [])
+    logan_database_entity_id  = optional(string)
+    logan_host_entity_id      = optional(string)
+    logan_adb_entity_id       = optional(string)
+    logan_management_agent_id = optional(string)
   }))
   description = "Database targets selected by the wizard."
   default     = []
+}
+
+variable "enable_log_analytics" {
+  type        = bool
+  description = "Enable Log Analytics add-on intent. Source associations are managed by dbman-opsi CLI payloads."
+  default     = false
+}
+
+variable "log_analytics_namespace" {
+  type        = string
+  description = "Existing Log Analytics namespace. Leave null to resolve/onboard through dbman-opsi log-analytics."
+  default     = null
+}
+
+variable "log_analytics_onboard_namespace" {
+  type        = bool
+  description = "Request namespace onboarding in the dbman-opsi Log Analytics workflow."
+  default     = false
+}
+
+variable "log_analytics_log_group_ocid" {
+  type        = string
+  description = "Existing Log Analytics log group OCID."
+  default     = null
+}
+
+variable "log_analytics_log_group_name" {
+  type        = string
+  description = "Log Analytics log group display name for CLI-managed create/reuse."
+  default     = "dbman-opsi-logan"
+}
+
+variable "log_analytics_create_log_group" {
+  type        = bool
+  description = "Create/reuse a Log Analytics log group in the CLI workflow when no OCID is supplied."
+  default     = true
+}
+
+variable "log_analytics_create_adb_collector" {
+  type        = bool
+  description = "Reserve intent for a private ADB collector host with Management Agent."
+  default     = false
 }
 
 variable "ssh_public_keys" {
   type        = list(string)
   description = "SSH public keys for provisioned DBCS VM DB systems."
   default     = []
-}
-
-variable "db_admin_password" {
-  type        = string
-  description = "Admin password for provisioned DBCS databases. Pass through TF_VAR_db_admin_password."
-  sensitive   = true
-  default     = null
-}
-
-variable "adb_admin_password" {
-  type        = string
-  description = "Admin password for provisioned Autonomous Databases. Pass through TF_VAR_adb_admin_password."
-  sensitive   = true
-  default     = null
 }
 
 variable "dbcs_shape" {
@@ -159,17 +220,25 @@ variable "opsi_private_endpoint_id" {
 
 variable "observability_targets" {
   description = <<-EOT
-    Targets for DBM/OPSI enablement, keyed by short name. service_name and host_ip
-    are runtime-discovered (lsnrctl / DB node IP), so they are supplied here after
-    the database is up rather than derived from Terraform attributes.
+    Targets for DBM/OPSI enablement, keyed by short name. service_name is
+    runtime-discovered after the database is up; host IPs are deliberately not
+    accepted by this public Terraform surface.
   EOT
   type = map(object({
-    database_id            = string
-    database_role          = string
-    database_resource_type = string # "database" | "pluggabledatabase"
-    service_name           = string
-    host_ip                = string
-    management_type        = optional(string, "ADVANCED")
+    database_id                = string
+    managed_database_name      = optional(string, "")
+    database_role              = string
+    database_resource_type     = string # "database" | "pluggabledatabase"
+    service_name               = string
+    management_type            = optional(string, "ADVANCED")
+    parent_target_key          = optional(string, "")
+    password_secret_id         = optional(string, null)
+    monitoring_user            = optional(string, "DBSNMP")
+    role                       = optional(string, "NORMAL")
+    protocol                   = optional(string, "TCP")
+    port                       = optional(number, 1521)
+    enable_database_management = optional(bool, true)
+    enable_ops_insights        = optional(bool, true)
   }))
   default = {}
 }

@@ -8,6 +8,60 @@ from dbman_opsi._oci_base import _OciBase
 
 
 class DatabaseManagementCommands(_OciBase):
+    _DBM_FEATURES = frozenset(("DIAGNOSTICS_AND_MANAGEMENT", "DB_LIFECYCLE_MANAGEMENT", "SQLWATCH"))
+
+    def disable_dbm_cdb(
+        self,
+        database_id: str,
+        feature: str,
+        *,
+        can_disable_all_pdbs: bool = False,
+    ) -> None:
+        """Disable DBM for a CDB after its PDB targets have been disabled."""
+
+        self._require_dbm_feature(feature)
+        if can_disable_all_pdbs and feature != "DIAGNOSTICS_AND_MANAGEMENT":
+            raise ValueError("can_disable_all_pdbs is only valid for DIAGNOSTICS_AND_MANAGEMENT")
+        args = [
+            "database-management", "managed-database",
+            "disable-database-management-feature",
+            "--database-id", database_id,
+            "--feature", feature,
+        ]
+        if can_disable_all_pdbs:
+            args.extend(["--can-disable-all-pdbs", "true"])
+        self.run(args)
+
+    def disable_dbm_pdb(self, pluggable_database_id: str, feature: str) -> None:
+        """Disable DBM for a PDB before its parent CDB is disabled."""
+
+        self._require_dbm_feature(feature)
+        self.run([
+            "database-management", "managed-database",
+            "disable-pluggable-database-management-feature",
+            "--pluggable-database-id", pluggable_database_id,
+            "--feature", feature,
+        ])
+
+    @classmethod
+    def _require_dbm_feature(cls, feature: str) -> None:
+        if feature not in cls._DBM_FEATURES:
+            raise ValueError("DBM feature must be one of DIAGNOSTICS_AND_MANAGEMENT, DB_LIFECYCLE_MANAGEMENT, SQLWATCH")
+
+    def delete_named_credential(self, credential_id: str) -> None:
+        self.run([
+            "database-management", "named-credential", "delete",
+            "--named-credential-id", credential_id,
+            "--force",
+        ])
+
+    def delete_db_management_private_endpoint(self, endpoint_id: str) -> None:
+        self.run([
+            "database-management", "private-endpoint", "delete",
+            "--private-endpoint-id", endpoint_id,
+            "--force",
+        ])
+
     def list_db_management_private_endpoints(self, compartment_id: str) -> list[dict[str, Any]]:
         data = self.run_json(["database-management", "private-endpoint", "list", "--compartment-id", compartment_id, "--all"])
         return self._items(data)

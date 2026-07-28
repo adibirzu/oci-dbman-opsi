@@ -196,7 +196,40 @@ class PreflightService:
         else:
             checks = self._native_checks(target)
         checks = checks + (self._vault_check(target), self._monitoring_user_check(target, db_check))
+        if target.wants("logan"):
+            checks = checks + self._log_analytics_checks(target, config)
         return TargetReport(name=target.name, kind=target.kind, location=location, checks=checks)
+
+    def _log_analytics_checks(self, target: Target, config: EnablementConfig) -> tuple[CheckResult, ...]:
+        checks: list[CheckResult] = []
+        namespace = config.log_analytics.namespace
+        if namespace:
+            checks.append(ok("logan.namespace", f"Log Analytics namespace configured: {namespace}"))
+        elif config.log_analytics.onboard_namespace:
+            checks.append(manual("logan.namespace", "Log Analytics namespace will be onboarded by log-analytics --apply"))
+        else:
+            checks.append(warn("logan.namespace", "Log Analytics namespace is not configured", "Set log_analytics.namespace or onboard_namespace=true."))
+        if config.log_analytics.log_group_id:
+            checks.append(ok("logan.log_group", "Log Analytics log group OCID configured"))
+        elif config.log_analytics.create_log_group:
+            checks.append(manual("logan.log_group", "Log Analytics log group will be created or reused by display name"))
+        else:
+            checks.append(warn("logan.log_group", "No Log Analytics log group OCID configured"))
+        if target.kind == "autonomous" and not target.logan_adb_entity_id:
+            checks.append(manual("logan.adb_wallet", "ADB collection requires wallet-based TCPS credentials on a private collector host"))
+        elif target.kind in {"dbcs", "exadata"} and not (target.logan_database_entity_id or target.logan_host_entity_id):
+            checks.append(manual("logan.entities", "log-analytics --apply can create/reuse Log Analytics database and host entities and write their OCIDs back into the config"))
+        if target.kind in {"dbcs", "exadata"} and not (target.logan_hostname and target.logan_adr_home and target.logan_oracle_home):
+            checks.append(
+                warn(
+                    "logan.source_properties",
+                    "Log Analytics source properties are incomplete",
+                    "Set logan_hostname, logan_adr_home, and logan_oracle_home for file-based DB log collection.",
+                )
+            )
+        if not (target.logan_management_agent_id or target.management_agent_id):
+            checks.append(manual("logan.management_agent", "Management Agent with Log Analytics plug-in must be installed and ready"))
+        return tuple(checks)
 
     def _native_checks(self, target: Target) -> tuple[CheckResult, ...]:
         if not target.resource_id:

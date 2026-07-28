@@ -1,88 +1,149 @@
 variable "compartment_id" {
-  description = "Compartment OCID that holds the databases, private endpoints, and Vault secret."
+  description = "Compartment OCID supplied by the caller; do not set a tenant default."
   type        = string
 }
 
 variable "dbm_private_endpoint_id" {
-  description = "Database Management private endpoint OCID."
+  description = "Existing DBM private endpoint OCID supplied by the caller."
   type        = string
 }
 
 variable "opsi_private_endpoint_id" {
-  description = "Operations Insights private endpoint OCID. Required when enable_ops_insights is true."
+  description = "Existing OPSI private endpoint OCID; required only when OPSI is enabled."
   type        = string
   default     = null
 }
 
-variable "password_secret_id" {
-  description = "Vault secret OCID holding the monitoring user's password."
-  type        = string
-}
-
-variable "monitoring_user" {
-  description = "Database monitoring user."
-  type        = string
-  default     = "DBSNMP"
-}
-
-# --- Feature toggles: flip a feature on/off without touching the others. ---
 variable "enable_database_management" {
-  type    = bool
-  default = true
-}
-
-variable "enable_ops_insights" {
-  type    = bool
-  default = true
-}
-
-variable "set_preferred_credentials" {
-  description = "Create a Vault named credential and wire PC_READ/PC_WRITE for advanced diagnostics."
+  description = "Master DBM intent. true is enable; false is permitted only in an explicit disable stage."
   type        = bool
   default     = true
 }
 
-variable "enable_data_safe" {
-  description = "Register each target as a Data Safe target database (security pillar)."
-  type        = bool
-  default     = false
-}
-
-variable "data_safe_private_endpoint_id" {
-  description = "Data Safe private endpoint OCID in the DB subnet. Required when enable_data_safe is true."
+variable "dbm_operation_stage" {
+  description = "DBM operation: enable, disable_pdb (apply first), or live-OCI-observation-gated disable_cdb."
   type        = string
-  default     = null
+  default     = "enable"
+
+  validation {
+    condition     = contains(["enable", "disable_pdb", "disable_cdb"], var.dbm_operation_stage)
+    error_message = "dbm_operation_stage must be enable, disable_pdb, or disable_cdb."
+  }
 }
 
-variable "data_safe_password" {
-  description = <<-EOT
-    Plaintext password for the Data Safe service account (monitoring_user). The
-    oci_data_safe_target_database resource takes a password, not a Vault secret,
-    so it lands in Terraform state — supply via TF_VAR_data_safe_password and keep
-    state encrypted/restricted; never commit it. Required when enable_data_safe is true.
-  EOT
+variable "pdb_disable_verification_receipt" {
+  description = "Deprecated compatibility input. Must remain null: disable_cdb rejects copied receipts and reads current OCI PDB feature state during planning."
   type        = string
   default     = null
   sensitive   = true
 }
 
+variable "enable_ops_insights" {
+  description = "Master OPSI toggle. false removes only Terraform-owned insights."
+  type        = bool
+  default     = true
+}
+
+variable "set_preferred_credentials" {
+  description = "Create Vault-backed named credentials; preferred-credential assignment remains a reviewed lifecycle operation."
+  type        = bool
+  default     = true
+}
+
+variable "enable_all_current_pdbs" {
+  description = "CDB-only enable control; never use it as a disable shortcut."
+  type        = bool
+  default     = false
+}
+
+variable "auto_enable_future_pdbs" {
+  description = "CDB-only enable control; disabled automatically outside the enable stage."
+  type        = bool
+  default     = false
+}
+
+variable "disable_all_pdbs_with_cdb" {
+  description = "Retained for compatibility but forbidden in disable_cdb; PDBs must be disabled in disable_pdb first."
+  type        = bool
+  default     = false
+}
+
+variable "lifecycle_id" {
+  description = "Required ownership/lifecycle tag value; no tenant-specific default is provided."
+  type        = string
+}
+
+variable "owner_tag" {
+  description = "Required accountable owner tag, such as a team or service label."
+  type        = string
+}
+
+variable "additional_freeform_tags" {
+  description = "Additional non-sensitive ownership tags."
+  type        = map(string)
+  default     = {}
+}
+
 variable "targets" {
-  description = <<-EOT
-    Enablement targets keyed by a short name (e.g. "cdb", "pdb1"). For OCI-native
-    DBCS the managed-database OCID equals the database / pluggable-database OCID,
-    so database_id is reused as the managed-database id. service_name must be the
-    REAL listener service (db_unique_name.domain for the CDB, pdb_name.domain for
-    a PDB) — the bare DB/PDB name causes ORA-12514.
-  EOT
+  description = "Sanitized target descriptors. Passwords, host IPs, and tenant defaults are deliberately not accepted."
   type = map(object({
-    database_id            = string
-    database_role          = string # CDB | PDB | NON_CDB
-    database_resource_type = string # OPSI value, lowercase: "database" | "pluggabledatabase"
-    service_name           = string
-    host_ip                = string
-    management_type        = optional(string, "ADVANCED")
-    # Parent DB system OCID — required only for Data Safe DATABASE_CLOUD_SERVICE
-    # registration (Base DB / Exadata cloud service).
-    db_system_id           = optional(string)
+    database_id                = string
+    managed_database_name      = optional(string, "") # exact OCI Managed Database identity for live disable observation
+    database_role              = string               # CDB | PDB | NON_CDB
+    database_resource_type     = string               # database | pluggabledatabase
+    service_name               = string
+    password_secret_id         = string # Vault reference, never a plaintext password
+    monitoring_user            = optional(string, "DBSNMP")
+    role                       = optional(string, "NORMAL")
+    protocol                   = optional(string, "TCP")
+    port                       = optional(number, 1521)
+    management_type            = optional(string, "ADVANCED")
+    parent_target_key          = optional(string, "")
+    enable_database_management = optional(bool, true)
+    enable_ops_insights        = optional(bool, true)
   }))
+
+  validation {
+    condition     = alltrue([for target in values(var.targets) : contains(["CDB", "PDB", "NON_CDB"], target.database_role)])
+    error_message = "database_role must be CDB, PDB, or NON_CDB."
+  }
+
+  validation {
+    condition     = alltrue([for target in values(var.targets) : target.database_role != "PDB" || trimspace(target.managed_database_name) != ""])
+    error_message = "Every PDB target must provide managed_database_name for the authoritative disable_cdb observation."
+  }
+
+  validation {
+    condition = alltrue([
+      for key, target in var.targets : target.database_role != "PDB" || (
+        trimspace(target.parent_target_key) != "" &&
+        contains(keys(var.targets), target.parent_target_key) &&
+        try(var.targets[target.parent_target_key].database_role, "") == "CDB" &&
+        target.database_resource_type == "pluggabledatabase"
+      )
+    ])
+    error_message = "Every PDB target must use database_resource_type=pluggabledatabase and name a CDB parent_target_key in this target map."
+  }
+
+  validation {
+    condition = alltrue([
+      for target in values(var.targets) : target.database_role != "CDB" || trimspace(target.parent_target_key) == ""
+    ])
+    error_message = "A CDB target must not declare parent_target_key."
+  }
+
+  validation {
+    condition     = alltrue([for target in values(var.targets) : target.protocol == "TCP" && target.port >= 1 && target.port <= 65535])
+    error_message = "Every target must use explicit TCP and a listener port between 1 and 65535."
+  }
+
+  validation {
+    condition     = alltrue([for target in values(var.targets) : contains(["NORMAL", "SYSDBA", "SYSOPER", "SYSASM"], target.role)])
+    error_message = "role must be an OCI-supported database connection role."
+  }
+
+  validation {
+    condition     = alltrue([for target in values(var.targets) : length(trimspace(target.password_secret_id)) > 0])
+    error_message = "Every production target must provide a non-empty Vault password_secret_id."
+  }
 }

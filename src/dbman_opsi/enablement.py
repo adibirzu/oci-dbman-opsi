@@ -136,23 +136,42 @@ class EnablementService:
             self.enable_target(target, force_reconcile=force_reconcile)
 
     def enable_target(self, target: Target, force_reconcile: bool = False) -> None:
+        """Legacy combined entry point retained for existing callers.
+
+        New lifecycle code must call ``enable_dbm`` and ``enable_opsi`` as
+        separate approved phases, so a DBM-only plan can never create OPSI.
+        """
+        self.enable_dbm(target, force_reconcile=force_reconcile)
+        # Older callers treated an unbound Autonomous insight as DBM-only;
+        # preserve that API while lifecycle callers receive a durable handoff.
+        if target.kind != "autonomous" or target.opsi_database_insight_id:
+            self.enable_opsi(target)
+
+    def enable_dbm(self, target: Target, force_reconcile: bool = False) -> bool:
         if target.kind == "autonomous":
-            self._enable_autonomous(target)
-            return
+            return self._enable_autonomous(target, enable_opsi=False)
         if target.kind in {"dbcs", "exadata"}:
-            self._enable_cloud_database(target, force_reconcile=force_reconcile)
-            return
+            return self._enable_cloud_database(target, force_reconcile=force_reconcile, enable_opsi=False)
         if target.kind in {"external-db", "external-exadata"}:
             self._print_external_next_step(target)
-            return
+            return False
         raise ValueError(f"Unsupported target kind: {target.kind}")
 
-    def enable_opsi(self, target: Target) -> None:
+    def enable_opsi(self, target: Target) -> bool:
+        if target.kind == "autonomous":
+            if not target.opsi_database_insight_id:
+                raise ValueError("autonomous OPSI requires an existing Database Insight ID or signed handoff")
+            self.oci.run([
+                "opsi", "database-insights", "enable-autonomous-database",
+                "--database-insight-id", target.opsi_database_insight_id,
+                "--is-advanced-features-enabled", "false",
+            ])
+            return True
         if target.kind not in {"dbcs", "exadata"}:
-            return
-        self._enable_opsi_pe_comanaged_if_ready(target)
+            return False
+        return self._enable_opsi_pe_comanaged_if_ready(target)
 
-    def _enable_autonomous(self, target: Target) -> None:
+    def _enable_autonomous(self, target: Target, *, enable_opsi: bool = True) -> bool:
         if not target.resource_id:
             raise ValueError(f"Target {target.name} is missing resource_id")
         self.oci.run([
@@ -162,23 +181,16 @@ class EnablementService:
             "--autonomous-database-id",
             target.resource_id,
         ])
-        if target.opsi_database_insight_id:
-            self.oci.run([
-                "opsi",
-                "database-insights",
-                "enable-autonomous-database",
-                "--database-insight-id",
-                target.opsi_database_insight_id,
-                "--is-advanced-features-enabled",
-                "false",
-            ])
+        if enable_opsi and target.opsi_database_insight_id:
+            self.enable_opsi(target)
+        return True
 
     # Markers returned by the Database service when Database Management is
     # already on (or its enable request is already in flight). Treated as an
     # idempotent no-op so re-runs proceed to the Ops Insights step.
     DBM_ALREADY_ENABLED_MARKERS = ("already enabled", "already created")
 
-    def _enable_cloud_database(self, target: Target, force_reconcile: bool = False) -> None:
+    def _enable_cloud_database(self, target: Target, force_reconcile: bool = False, *, enable_opsi: bool = True) -> bool:
         missing = missing_cloud_fields(target)
         if missing:
             raise ValueError(f"Target {target.name} is missing required fields: {', '.join(missing)}")
@@ -202,7 +214,9 @@ class EnablementService:
             # registered) before attaching Ops Insights, to avoid the propagation
             # race ("Provided database resource details were missing").
             self._wait_dbm_enabled(target)
-        self._enable_opsi_pe_comanaged_if_ready(target)
+        if enable_opsi:
+            self._enable_opsi_pe_comanaged_if_ready(target)
+        return applied
 
     def _wait_dbm_enabled(self, target: Target) -> None:
         """Poll until the target's Database Management status is ENABLED.
@@ -245,7 +259,7 @@ class EnablementService:
         except (RuntimeError, AttributeError):
             return False
 
-    def _enable_opsi_pe_comanaged_if_ready(self, target: Target) -> None:
+    def _enable_opsi_pe_comanaged_if_ready(self, target: Target) -> bool:
         shared_missing = [
             name
             for name, value in {
@@ -258,15 +272,14 @@ class EnablementService:
         ]
         if shared_missing:
             log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(shared_missing))
-            return
+            return False
         if self._opsi_insight_active(target):
             # Idempotent: an ACTIVE insight already collects, so do not re-create
             # (create-pe-comanaged on an existing insight conflicts / hangs).
             log.info("Ops Insights insight already ACTIVE for %s; skipping create", target.name)
-            return
+            return False
         if not target.opsi_database_insight_id:
-            self._create_opsi_pe_comanaged(target)
-            return
+            return self._create_opsi_pe_comanaged(target)
         args = [
             "opsi",
             "database-insights",
@@ -285,6 +298,7 @@ class EnablementService:
         if target.opsi_connection_details_file:
             args.extend(["--connection-details", f"file://{target.opsi_connection_details_file}"])
         self.oci.run(args)
+        return True
 
     def _opsi_insight_active(self, target: Target) -> bool:
         """True when an ACTIVE OPSI insight already exists for this database."""
@@ -325,7 +339,7 @@ class EnablementService:
             )
         return False
 
-    def _create_opsi_pe_comanaged(self, target: Target) -> None:
+    def _create_opsi_pe_comanaged(self, target: Target) -> bool:
         missing = [
             name
             for name, value in {
@@ -338,7 +352,7 @@ class EnablementService:
         ]
         if missing:
             log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(missing))
-            return
+            return False
         args = [
             "opsi",
             "database-insights",
@@ -376,7 +390,7 @@ class EnablementService:
                 created = self.oci.run_tolerating(args, tolerated=("already exists",))
                 if not created:
                     log.info("Ops Insights insight already exists for %s; left as-is", target.name)
-                return
+                return created
             except RuntimeError as exc:
                 is_propagation = any(marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS)
                 if is_propagation and attempt < self.opsi_create_attempts - 1:

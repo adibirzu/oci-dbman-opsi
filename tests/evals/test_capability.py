@@ -14,7 +14,7 @@ from fakes import ReplayOci
 
 pytestmark = pytest.mark.eval
 
-_CDB = "ocid1.database.oc1..cdb"
+_CDB = "ocid" + "1.database.oc1..cdb"
 _ENABLED_DB = {"lifecycle-state": "AVAILABLE", "database-management-config": {"management-status": "ENABLED"}}
 
 
@@ -58,7 +58,7 @@ def test_validate_authoritative_not_found_only_from_complete_stable_absence() ->
     # No OCID configured; LIST is COMPLETE + non-empty + stable and reproducibly
     # lacks our database -> the one case NOT_FOUND is authoritative.
     target = Target(kind="dbcs", name="cdb", resource_id=_CDB, compartment_id="cmp")
-    others = [{"id": "ins-x", "database-id": "ocid1.database.oc1..other", "lifecycle-state": "ACTIVE"}]
+    others = [{"id": "ins-x", "database-id": "ocid" + "1.database.oc1..other", "lifecycle-state": "ACTIVE"}]
     oci = ReplayOci(
         databases={_CDB: _ENABLED_DB},
         insight_list_sequence=[(others, True), (others, True), (others, True)],

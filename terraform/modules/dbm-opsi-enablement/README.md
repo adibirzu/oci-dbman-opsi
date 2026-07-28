@@ -1,78 +1,133 @@
-# Module: dbm-opsi-enablement
+# dbm-opsi-enablement
 
-Declarative, modular enablement of OCI **Database Management** and **Operations
-Insights** for already-provisioned OCI-native databases (DBCS CDB/PDB). Designed
-for Resource Manager (ORM) and CI so a POC/demo stack comes up end-to-end.
+OCI Database Management (canonical `database_dbm_features_management`) and
+optional Operations Insights for reviewed database targets. It accepts Vault
+secret references only: never put a database password, host address, or
+tenant default in this module or its state.
 
-Each capability is independently toggled and driven by `for_each` over a
-`targets` map — adding a target or turning a feature off is a no-destroy change
-to the others. New capabilities are added as new, independently-gated blocks.
+## CDB/PDB ordering contract
 
-## What it creates
+`targets` has an explicit role model: a `PDB` must declare a
+`parent_target_key` that names a `CDB` in the same map. The module gives the
+PDB DBM resource a Terraform graph dependency on the CDB DBM resource, so an
+enable apply completes the CDB operation before every PDB operation.
 
-| Resource | Purpose | Toggle |
-|---|---|---|
-| `oci_database_management_database_dbm_features_management` | DBM (DIAGNOSTICS_AND_MANAGEMENT, ADVANCED) over the DBM PE | `enable_database_management` |
-| `oci_database_management_named_credential` | Vault-backed RESOURCE_PRINCIPAL credential for advanced diagnostics | `set_preferred_credentials` |
-| `null_resource.preferred_credential` (oci CLI) | Wire `PC_READ`/`PC_WRITE` to the named credential (no TF resource exists for this) | `set_preferred_credentials` |
-| `oci_opsi_database_insight` | OPSI PE co-managed Database Insight | `enable_ops_insights` |
-| `oci_data_safe_target_database` | Data Safe target registration over the Data Safe PE (security pillar) | `enable_data_safe` |
+Terraform cannot safely reverse that in-place update edge. A disable is
+therefore deliberately fail-closed and requires two applies:
 
-Data Safe needs `data_safe_private_endpoint_id`, each target's `db_system_id`, and
-`data_safe_password` (plaintext — the API takes a password, not a Vault secret, so
-it lands in state; pass via `TF_VAR_data_safe_password` and keep state restricted).
+1. `disable_pdb` sends only PDB DBM disable updates and leaves CDB DBM on.
+   Apply it, then run the Terraform-owned observer below for a redaction-safe
+   change record.
+2. `disable_cdb` performs a fresh OCI provider read during its own plan for
+   every PDB's `DIAGNOSTICS_AND_MANAGEMENT` feature. It fails closed unless
+   each PDB resolves uniquely and is absent, `DISABLED`, or `NOT_ENABLED`.
+   Copied, recomputed, stale, and unsigned receipts are rejected; it never
+   uses `disable_all_pdbs_with_cdb` as a shortcut.
 
-## Usage
+Resource addresses are role-stable (`dbm_cdb`, `dbm_pdb`, and
+`dbm_standalone`), so changing stage is an explicit provider update rather
+than a destroy/recreate transition.
+
+## Upgrade from the previous single-resource release
+
+Do not apply this release directly to a state that contains the older
+`oci_database_management_database_dbm_features_management.dbm` address.
+Terraform cannot infer how to split one `for_each` resource into the three
+role-specific addresses. Before changing the module source, take the approved
+encrypted-state backup and use reviewed `terraform state mv` commands for each
+existing target, for example:
+
+```sh
+terraform state mv \
+  'oci_database_management_database_dbm_features_management.dbm["<CDB_KEY>"]' \
+  'oci_database_management_database_dbm_features_management.dbm_cdb["<CDB_KEY>"]'
+terraform state mv \
+  'oci_database_management_database_dbm_features_management.dbm["<PDB_KEY>"]' \
+  'oci_database_management_database_dbm_features_management.dbm_pdb["<PDB_KEY>"]'
+terraform state mv \
+  'oci_database_management_database_dbm_features_management.dbm["<NON_CDB_KEY>"]' \
+  'oci_database_management_database_dbm_features_management.dbm_standalone["<NON_CDB_KEY>"]'
+```
+
+Run a reviewed refresh-backed plan after the moves. It must show no DBM
+delete/create actions before an enable or staged-disable operation proceeds.
+
+## Enable example
 
 ```hcl
 module "observability" {
   source = "../../modules/dbm-opsi-enablement"
 
-  compartment_id           = var.compartment_id
-  dbm_private_endpoint_id  = var.dbm_private_endpoint_id
-  opsi_private_endpoint_id = var.opsi_private_endpoint_id
-  password_secret_id       = var.dbsnmp_secret_id
-  monitoring_user          = "DBSNMP"
+  compartment_id          = var.compartment_id
+  dbm_private_endpoint_id = var.dbm_private_endpoint_id
+  lifecycle_id            = "<REVIEWED_LIFECYCLE_ID>"
+  owner_tag               = "database-platform"
 
   targets = {
     cdb = {
-      database_id            = var.cdb_ocid
+      database_id            = var.cdb_id
       database_role          = "CDB"
       database_resource_type = "database"
-      service_name           = "<db_unique_name>.<db_domain>" # REAL listener service, not the bare DB name
-      host_ip                = var.db_node_private_ip
+      service_name           = "<CDB_LISTENER_SERVICE>"
+      password_secret_id     = var.dbsnmp_secret_id
     }
-    pdb1 = {
-      database_id            = var.pdb_ocid
+    pdb = {
+      database_id            = var.pdb_id
+      managed_database_name  = "<PDB_MANAGED_DATABASE_NAME>"
       database_role          = "PDB"
+      parent_target_key      = "cdb"
       database_resource_type = "pluggabledatabase"
-      service_name           = "<pdb_name>.<db_domain>"
-      host_ip                = var.db_node_private_ip
+      service_name           = "<PDB_LISTENER_SERVICE>"
+      password_secret_id     = var.dbsnmp_secret_id
     }
   }
 }
 ```
 
-## Prerequisites (must exist before this module)
+Use the default `dbm_operation_stage = "enable"` with
+`enable_database_management = true`.
 
-- DBM + OPSI private endpoints, reachable from the DB subnet on 1521.
-- The monitoring user (DBSNMP) **unlocked, on a non-locking profile**, with a
-  password that matches the Vault secret (see the CLI `enable` / KB for the
-  `C##DBSNMP_MON` profile and credential-sync steps). Rotating DBSNMP without this
-  causes an ORA-28000 lock loop.
-- `service_name` set to the real listener service (`lsnrctl status`), not the bare
-  DB/PDB name (ORA-12514 otherwise).
-- The `oci` CLI on the apply runner (Cloud Shell / ORM) authenticated to the same
-  tenancy — used for the preferred-credential step.
-- IAM: `Allow any-user to read secret-family in compartment <C> where ALL
-  {target.secret.id='<secret>', request.principal.type='dbmgmtmanageddatabase'}`.
+## Two-stage disable example
 
-## Status & verification
+Keep the same reviewed target map and ownership values for both applies.
 
-`terraform validate` passes (resource types and arguments are schema-correct
-against the `oracle/oci` provider). **Apply-test in a scratch tenancy before
-production** — enum values (`deployment_type`, `database_resource_type`) and the
-OPSI connection shape should be confirmed against your DB. The verified,
-self-healing path today is the `dbman-opsi` CLI (`enable --apply`, which reconciles
-DBM, skips already-ACTIVE OPSI insights, and sets preferred credentials); this
-module mirrors that for teams that prefer pure Terraform/ORM.
+```hcl
+# First apply: only PDB DBM is disabled; CDB stays on.
+enable_database_management = false
+dbm_operation_stage        = "disable_pdb"
+```
+
+After apply, create an independent operator receipt with the repository-owned
+observer. Its output has a target-set digest, completion timestamp, OCI CLI
+source, random nonce, and a digest of the observed feature statuses; it never
+prints database IDs or secrets.
+
+```sh
+python3 terraform/scripts/observe_pdb_dbm_state.py \
+  --compartment-id "<COMPARTMENT_ID>" \
+  --lifecycle-id "<REVIEWED_LIFECYCLE_ID>" \
+  --targets-file /secure/reviewed-pdb-targets.json
+```
+
+The ignored targets file is a JSON map whose PDB values contain only
+`database_id` and `managed_database_name`. Retain this receipt with the change
+record, but do **not** feed it to Terraform: the CDB plan performs its own live
+provider observation and rejects all copied receipt values.
+
+```hcl
+# Second apply: live-observation-gated CDB disable.
+enable_database_management = false
+dbm_operation_stage        = "disable_cdb"
+disable_all_pdbs_with_cdb  = false
+```
+
+## Prerequisites
+
+- Existing DBM private endpoint and, for OPSI, OPSI private endpoint.
+- A Vault secret reference for every target monitoring account.
+- A monitoring user that can connect to each supplied listener service.
+- IAM allowing the DBM managed database principal to read each Vault secret.
+
+Run `terraform fmt -recursive terraform` and `terraform validate` before a
+reviewed plan. Do not commit a plan binary, state, credentials, or a
+tenant-specific tfvars file.

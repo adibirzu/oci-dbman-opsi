@@ -1,36 +1,141 @@
-# Modular DBM + Ops Insights enablement.
-#
-# Each capability is gated by its own toggle and driven by for_each over the
-# `targets` map, so adding a target or turning a feature off is a no-destroy
-# change to the others. New capabilities should be added as additional,
-# independently-gated resource blocks here.
+# Production DBM/OPSI enablement. Database passwords are never Terraform inputs:
+# DBM and OPSI receive only Vault secret references.
 
 locals {
-  dbm_targets  = var.enable_database_management ? var.targets : {}
-  opsi_targets = var.enable_ops_insights && var.opsi_private_endpoint_id != null ? var.targets : {}
-  cred_targets = var.set_preferred_credentials ? var.targets : {}
-  data_safe_targets = var.enable_data_safe && var.data_safe_private_endpoint_id != null ? var.targets : {}
-
-  # Cartesian product of credential targets x preferred-credential slots.
-  preferred_credentials = merge([
-    for name, _ in local.cred_targets : {
-      for slot in ["PC_READ", "PC_WRITE"] : "${name}-${slot}" => {
-        target = name
-        slot   = slot
-      }
+  cdb_targets = {
+    for name, target in var.targets : name => target
+    if target.database_role == "CDB"
+  }
+  pdb_targets = {
+    for name, target in var.targets : name => target
+    if target.database_role == "PDB"
+  }
+  standalone_targets = {
+    for name, target in var.targets : name => target
+    if target.database_role == "NON_CDB"
+  }
+  credential_targets = var.set_preferred_credentials ? var.targets : {}
+  opsi_targets = {
+    for name, target in var.targets : name => target
+    if var.enable_ops_insights && var.opsi_private_endpoint_id != null && target.enable_ops_insights
+  }
+  pdb_observation_targets = var.dbm_operation_stage == "disable_cdb" ? local.pdb_targets : {}
+  pdb_target_set = {
+    for key, target in local.pdb_targets : key => {
+      database_id           = target.database_id
+      managed_database_name = target.managed_database_name
     }
-  ]...)
+  }
+  pdb_target_set_digest = sha256(jsonencode({
+    lifecycle_id = var.lifecycle_id
+    targets      = local.pdb_target_set
+  }))
+  remaining_target_keys = var.dbm_operation_stage == "disable_pdb" ? sort(keys(local.cdb_targets)) : []
+  ownership_tags = merge(
+    {
+      "dbman_opsi_owner"        = var.owner_tag
+      "dbman_opsi_lifecycle_id" = var.lifecycle_id
+      "dbman_opsi_managed_by"   = "terraform"
+    },
+    var.additional_freeform_tags,
+  )
 }
 
-# 1. Database Management (DIAGNOSTICS_AND_MANAGEMENT) over the DBM private endpoint.
-resource "oci_database_management_database_dbm_features_management" "dbm" {
-  for_each                    = local.dbm_targets
+# Terraform cannot reverse a dependency during an in-place provider update.
+# This persistent guard therefore makes CDB disable a separate, live-observation
+# operation rather than risking an all-at-once parent-first update.
+resource "terraform_data" "operation_contract" {
+  input = {
+    stage                 = var.dbm_operation_stage
+    remaining_target_keys = local.remaining_target_keys
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.dbm_operation_stage != "enable" || var.enable_database_management
+      error_message = "enable requires enable_database_management=true; use disable_pdb then disable_cdb for an explicit disable."
+    }
+    precondition {
+      condition     = var.dbm_operation_stage != "enable" || alltrue([for target in values(var.targets) : target.enable_database_management])
+      error_message = "enable rejects per-target enable_database_management=false; scope an explicit disable_pdb/disable_cdb operation to the reviewed target map instead."
+    }
+    precondition {
+      condition     = !contains(["disable_pdb", "disable_cdb"], var.dbm_operation_stage) || !var.enable_database_management
+      error_message = "disable_pdb and disable_cdb require enable_database_management=false so an accidental all-at-once enable/disable plan is rejected."
+    }
+    precondition {
+      condition     = var.pdb_disable_verification_receipt == null
+      error_message = "disable_cdb does not accept a copied receipt. It performs a fresh authoritative OCI provider observation of every PDB DBM feature during this plan."
+    }
+    precondition {
+      condition     = var.dbm_operation_stage != "disable_cdb" || !var.disable_all_pdbs_with_cdb
+      error_message = "disable_cdb forbids disable_all_pdbs_with_cdb; disable and verify PDBs in the prior disable_pdb stage."
+    }
+  }
+}
+
+# This provider read is authoritative at plan time. It deliberately makes a
+# forged, stale, or recomputed local receipt irrelevant to CDB disablement.
+data "oci_database_management_managed_databases" "pdb_disable_collection" {
+  for_each       = local.pdb_observation_targets
+  compartment_id = var.compartment_id
+  name           = each.value.managed_database_name
+}
+
+locals {
+  pdb_disable_matches = {
+    for key, lookup in data.oci_database_management_managed_databases.pdb_disable_collection : key => [
+      for item in lookup.managed_database_collection[0].items : item
+      if item.name == local.pdb_observation_targets[key].managed_database_name && item.compartment_id == var.compartment_id
+    ]
+  }
+  pdb_disable_managed_database_ids = {
+    for key, matches in local.pdb_disable_matches : key => one(matches).id
+    if length(matches) == 1
+  }
+}
+
+data "oci_database_management_managed_database" "pdb_disable_observation" {
+  for_each            = local.pdb_disable_managed_database_ids
+  managed_database_id = each.value
+}
+
+resource "terraform_data" "pdb_disable_observation" {
+  count = var.dbm_operation_stage == "disable_cdb" ? 1 : 0
+  input = {
+    target_set_digest = local.pdb_target_set_digest
+    observer          = "oracle/oci managed_database data source"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = alltrue([for matches in values(local.pdb_disable_matches) : length(matches) == 1])
+      error_message = "disable_cdb requires exactly one Managed Database observation for every PDB in the reviewed target set."
+    }
+    precondition {
+      condition = alltrue([
+        for observed in values(data.oci_database_management_managed_database.pdb_disable_observation) : alltrue([
+          for feature in observed.dbmgmt_feature_configs : feature.feature != "DIAGNOSTICS_AND_MANAGEMENT" || contains(["DISABLED", "NOT_ENABLED"], upper(feature.feature_status))
+        ])
+      ])
+      error_message = "disable_cdb requires every observed PDB DIAGNOSTICS_AND_MANAGEMENT feature to be absent, DISABLED, or NOT_ENABLED."
+    }
+  }
+}
+
+# Separate, stable addresses are deliberate. The PDB resource has a real graph
+# edge to CDB for enablement; it is never removed/recreated to switch stages.
+resource "oci_database_management_database_dbm_features_management" "dbm_cdb" {
+  for_each                    = local.cdb_targets
   database_id                 = each.value.database_id
-  enable_database_dbm_feature = true
+  enable_database_dbm_feature = var.dbm_operation_stage != "disable_cdb"
+  can_disable_all_pdbs        = false
 
   feature_details {
-    feature         = "DIAGNOSTICS_AND_MANAGEMENT"
-    management_type = each.value.management_type
+    feature                           = "DIAGNOSTICS_AND_MANAGEMENT"
+    management_type                   = each.value.management_type
+    can_enable_all_current_pdbs       = var.dbm_operation_stage == "enable" && var.enable_all_current_pdbs
+    is_auto_enable_pluggable_database = var.dbm_operation_stage == "enable" && var.auto_enable_future_pdbs
 
     connector_details {
       connector_type       = "PE"
@@ -40,128 +145,143 @@ resource "oci_database_management_database_dbm_features_management" "dbm" {
     database_connection_details {
       connection_credentials {
         credential_type    = "DETAILS"
-        user_name          = var.monitoring_user
-        password_secret_id = var.password_secret_id
-        role               = "NORMAL"
+        user_name          = each.value.monitoring_user
+        password_secret_id = each.value.password_secret_id
+        role               = each.value.role
       }
       connection_string {
         connection_type = "BASIC"
-        port            = 1521
-        protocol        = "TCP"
+        port            = each.value.port
+        protocol        = each.value.protocol
         service         = each.value.service_name
       }
     }
   }
+
+  depends_on = [
+    terraform_data.operation_contract,
+    terraform_data.pdb_disable_observation,
+  ]
 }
 
-# 2. Vault-backed Named Credential (RESOURCE_PRINCIPAL) for advanced diagnostics.
+resource "oci_database_management_database_dbm_features_management" "dbm_pdb" {
+  for_each                    = local.pdb_targets
+  database_id                 = each.value.database_id
+  enable_database_dbm_feature = var.dbm_operation_stage == "enable"
+  can_disable_all_pdbs        = false
+
+  feature_details {
+    feature                           = "DIAGNOSTICS_AND_MANAGEMENT"
+    management_type                   = each.value.management_type
+    can_enable_all_current_pdbs       = false
+    is_auto_enable_pluggable_database = false
+
+    connector_details {
+      connector_type       = "PE"
+      private_end_point_id = var.dbm_private_endpoint_id
+    }
+
+    database_connection_details {
+      connection_credentials {
+        credential_type    = "DETAILS"
+        user_name          = each.value.monitoring_user
+        password_secret_id = each.value.password_secret_id
+        role               = each.value.role
+      }
+      connection_string {
+        connection_type = "BASIC"
+        port            = each.value.port
+        protocol        = each.value.protocol
+        service         = each.value.service_name
+      }
+    }
+  }
+
+  depends_on = [oci_database_management_database_dbm_features_management.dbm_cdb]
+}
+
+resource "oci_database_management_database_dbm_features_management" "dbm_standalone" {
+  for_each                    = local.standalone_targets
+  database_id                 = each.value.database_id
+  enable_database_dbm_feature = var.dbm_operation_stage == "enable"
+  can_disable_all_pdbs        = false
+
+  feature_details {
+    feature                           = "DIAGNOSTICS_AND_MANAGEMENT"
+    management_type                   = each.value.management_type
+    can_enable_all_current_pdbs       = false
+    is_auto_enable_pluggable_database = false
+
+    connector_details {
+      connector_type       = "PE"
+      private_end_point_id = var.dbm_private_endpoint_id
+    }
+
+    database_connection_details {
+      connection_credentials {
+        credential_type    = "DETAILS"
+        user_name          = each.value.monitoring_user
+        password_secret_id = each.value.password_secret_id
+        role               = each.value.role
+      }
+      connection_string {
+        connection_type = "BASIC"
+        port            = each.value.port
+        protocol        = each.value.protocol
+        service         = each.value.service_name
+      }
+    }
+  }
+
+  depends_on = [terraform_data.operation_contract]
+}
+
+# Vault-backed named credentials retain stable addresses across all DBM stages;
+# switching DBM off cannot silently destroy a credential and recreate it later.
 resource "oci_database_management_named_credential" "dbsnmp" {
-  for_each            = local.cred_targets
+  for_each            = local.credential_targets
   compartment_id      = var.compartment_id
-  name                = "${each.key}_${var.monitoring_user}_NORMAL"
+  name                = "${var.lifecycle_id}-${each.key}-monitoring"
   scope               = "RESOURCE"
   type                = "ORACLE_DB"
   associated_resource = each.value.database_id
+  freeform_tags       = local.ownership_tags
 
   content {
     credential_type             = "BASIC"
-    user_name                   = var.monitoring_user
-    role                        = "NORMAL"
-    password_secret_id          = var.password_secret_id
+    user_name                   = each.value.monitoring_user
+    role                        = each.value.role
+    password_secret_id          = each.value.password_secret_id
     password_secret_access_mode = "RESOURCE_PRINCIPAL"
   }
 
-  depends_on = [oci_database_management_database_dbm_features_management.dbm]
+  depends_on = [
+    oci_database_management_database_dbm_features_management.dbm_cdb,
+    oci_database_management_database_dbm_features_management.dbm_pdb,
+    oci_database_management_database_dbm_features_management.dbm_standalone,
+  ]
 }
 
-# 3. Preferred credentials PC_READ / PC_WRITE -> the named credential.
-# The OCI provider exposes preferred credentials only as a data source (no
-# resource), so they are wired with the dedicated CLI verb. Runs on apply and
-# whenever the named credential changes. Requires the `oci` CLI on the runner
-# (Cloud Shell / ORM agent) authenticated to the same tenancy.
-resource "null_resource" "preferred_credential" {
-  for_each = local.preferred_credentials
-
-  triggers = {
-    managed_database_id = local.cred_targets[each.value.target].database_id
-    named_credential_id = oci_database_management_named_credential.dbsnmp[each.value.target].id
-    slot                = each.value.slot
-  }
-
-  provisioner "local-exec" {
-    command = join(" ", [
-      "oci database-management preferred-credential",
-      "update-preferred-credential-update-named-preferred-credential-details",
-      "--managed-database-id", self.triggers.managed_database_id,
-      "--credential-name", self.triggers.slot,
-      "--named-credential-id", self.triggers.named_credential_id,
-    ])
-  }
-}
-
-# 4. Operations Insights PE co-managed Database Insight.
 resource "oci_opsi_database_insight" "insight" {
   for_each                 = local.opsi_targets
   compartment_id           = var.compartment_id
   entity_source            = "PE_COMANAGED_DATABASE"
   database_id              = each.value.database_id
   database_resource_type   = each.value.database_resource_type
-  deployment_type          = "VIRTUAL_MACHINE"
-  opsi_private_endpoint_id  = var.opsi_private_endpoint_id
+  dbm_private_endpoint_id  = var.dbm_private_endpoint_id
+  opsi_private_endpoint_id = var.opsi_private_endpoint_id
+  freeform_tags            = local.ownership_tags
 
   credential_details {
-    credential_type        = "CREDENTIALS_BY_VAULT"
-    credential_source_name = "${each.key}-dbsnmp"
-    user_name              = var.monitoring_user
-    role                   = "NORMAL"
-    password_secret_id     = var.password_secret_id
+    credential_type    = "CREDENTIALS_BY_VAULT"
+    user_name          = each.value.monitoring_user
+    role               = each.value.role
+    password_secret_id = each.value.password_secret_id
   }
 
-  connection_details {
-    protocol     = "TCP"
-    service_name = each.value.service_name
-
-    hosts {
-      host_ip = each.value.host_ip
-      port    = 1521
-    }
-  }
-
-  lifecycle {
-    # deployment_type is accepted on create but not returned by the API, so
-    # without this TF would perpetually try to re-set it and force replacement.
-    ignore_changes = [deployment_type]
-  }
-
-  depends_on = [oci_database_management_database_dbm_features_management.dbm]
-}
-
-# 5. Data Safe target-database registration (security pillar).
-# Connects through the Data Safe private endpoint as the monitoring user. The
-# password is plaintext in state (the API takes a password, not a Vault secret),
-# so supply it via TF_VAR_data_safe_password and keep state restricted.
-resource "oci_data_safe_target_database" "target" {
-  for_each       = local.data_safe_targets
-  compartment_id = var.compartment_id
-  display_name   = each.key
-
-  database_details {
-    database_type       = "DATABASE_CLOUD_SERVICE"
-    infrastructure_type = "ORACLE_CLOUD"
-    db_system_id        = each.value.db_system_id
-    service_name        = each.value.service_name
-    listener_port       = 1521
-  }
-
-  connection_option {
-    connection_type              = "PRIVATE_ENDPOINT"
-    datasafe_private_endpoint_id = var.data_safe_private_endpoint_id
-  }
-
-  credentials {
-    user_name = var.monitoring_user
-    password  = var.data_safe_password
-  }
-
-  depends_on = [oci_database_management_database_dbm_features_management.dbm]
+  depends_on = [
+    oci_database_management_database_dbm_features_management.dbm_cdb,
+    oci_database_management_database_dbm_features_management.dbm_pdb,
+    oci_database_management_database_dbm_features_management.dbm_standalone,
+  ]
 }

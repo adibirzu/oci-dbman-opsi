@@ -1,3 +1,5 @@
+from urllib.parse import parse_qs, urlsplit
+
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.runner import CommandResult, OciError
 
@@ -51,6 +53,7 @@ def test_oci_cli_lists_known_resource_types() -> None:
     oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
 
     assert oci.list_compartments("tenancy-id") == []
+    assert oci.list_subscribed_regions("tenancy-id") == []
     assert oci.list_subnets("compartment-id", "vcn-id") == []
     assert oci.list_db_systems("compartment-id") == []
     assert oci.list_databases("compartment-id", "db-system-id") == []
@@ -65,15 +68,163 @@ def test_oci_cli_lists_known_resource_types() -> None:
     assert oci.list_opsi_private_endpoints("compartment-id") == []
 
 
-def test_oci_cli_database_list_does_not_use_unsupported_all_flag() -> None:
+def test_region_subscription_list_uses_tenancy_id_not_compartment_id() -> None:
     runner = FakeRunner('{"data": []}')
     oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
 
-    assert oci.list_databases("compartment-id", "db-system-id") == []
+    assert oci.list_subscribed_regions("tenancy-id") == []
 
     command = runner.commands[0]
-    assert command[5:8] == ["db", "database", "list"]
+    assert command[5:8] == ["iam", "region-subscription", "list"]
+    assert ["--tenancy-id", "tenancy-id"] == command[8:10]
+    assert "--compartment-id" not in command
+    assert "--all" in command
+
+
+class _PagedDatabaseRunner:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = iter(responses)
+        self.commands: list[list[str]] = []
+
+    def run(self, args, cwd=None, check=True, retry_on_transient=False):
+        self.commands.append(args)
+        return CommandResult(tuple(args), next(self.responses), "", 0)
+
+
+def _database_page_query(command: list[str]) -> dict[str, list[str]]:
+    assert command[:5] == ["oci", "--profile", "DEFAULT", "--region", "eu-frankfurt-1"]
+    assert command[5:9] == ["raw-request", "--http-method", "GET", "--target-uri"]
+    assert command[-2:] == ["--output", "json"]
     assert "--all" not in command
+    assert "--page" not in command
+    assert "--page-token" not in command
+    assert "--db-home-id" not in command
+
+    target = urlsplit(command[9])
+    assert target.scheme == "https"
+    assert target.netloc == "database.eu-frankfurt-1.oraclecloud.com"
+    assert target.path == "/20160918/databases"
+    return parse_qs(target.query)
+
+
+def test_oci_cli_database_db_system_route_follows_all_pages_with_stable_deduplication() -> None:
+    # Break caught: returning only the first page omits database-c from discovery.
+    runner = _PagedDatabaseRunner([
+        '{"data": [{"id": "database-b"}, {"id": "database-a"}], "headers": {"opc-next-page": "page-2"}}',
+        '{"data": [{"id": "database-a"}, {"id": "database-c"}], "headers": {}}',
+    ])
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    databases = oci.list_databases("compartment-id", "db-system-id")
+
+    assert [database["id"] for database in databases] == ["database-b", "database-a", "database-c"]
+    assert len(runner.commands) == 2
+    assert _database_page_query(runner.commands[0]) == {
+        "compartmentId": ["compartment-id"],
+        "dbSystemId": ["db-system-id"],
+    }
+    assert _database_page_query(runner.commands[1]) == {
+        "compartmentId": ["compartment-id"],
+        "dbSystemId": ["db-system-id"],
+        "page": ["page-2"],
+    }
+
+
+def test_oci_cli_lists_all_db_homes_per_system_and_exadata_pages() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_db_homes("compartment-id", db_system_id="db-system-id") == []
+    assert "--db-system-id" in runner.commands[0]
+    assert "--all" in runner.commands[0]
+
+    assert oci.list_exadata_infrastructure("compartment-id") == []
+    assert "--all" in runner.commands[1]
+
+
+def test_oci_cli_db_home_topology_and_database_list_reject_invalid_parent_shapes() -> None:
+    class _DbHomeRunner:
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def run(self, args, **_kwargs):
+            self.commands.append(args)
+            if args[5:8] == ["db", "db-home", "list"]:
+                assert "--db-system-id" in args
+                assert "--vm-cluster-id" not in args
+                payload = '{"data": [{"id": "home-a"}, {"id": "home-b"}]}'
+            else:
+                assert _database_page_query(args) == {
+                    "compartmentId": ["compartment-id"],
+                    "dbSystemId": ["system-id"],
+                }
+                payload = '{"data": [{"id": "database-system"}], "headers": {}}'
+            return CommandResult(tuple(args), payload, "", 0)
+
+    runner = _DbHomeRunner()
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    assert oci.list_db_homes("compartment-id", db_system_id="system-id") == [{"id": "home-a"}, {"id": "home-b"}]
+    databases = oci.list_databases("compartment-id", "system-id")
+
+    assert [database["id"] for database in databases] == ["database-system"]
+    assert "--all" in runner.commands[0]
+
+
+def test_oci_cli_database_vm_cluster_route_follows_all_pages_with_stable_deduplication() -> None:
+    # Break caught: returning only the first page omits exadata-database-c.
+    runner = _PagedDatabaseRunner([
+        '{"data": [{"id": "exadata-database-b"}, {"id": "exadata-database-a"}], "headers": {"OPC-Next-Page": "page-2"}}',
+        '{"data": [{"id": "exadata-database-a"}, {"id": "exadata-database-c"}], "headers": {}}',
+    ])
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    databases = oci.list_databases_for_vm_cluster("compartment-id", "vm-cluster-id")
+
+    assert [database["id"] for database in databases] == [
+        "exadata-database-b", "exadata-database-a", "exadata-database-c"
+    ]
+    assert len(runner.commands) == 2
+    assert _database_page_query(runner.commands[0]) == {
+        "compartmentId": ["compartment-id"],
+        "vmClusterId": ["vm-cluster-id"],
+    }
+    assert _database_page_query(runner.commands[1]) == {
+        "compartmentId": ["compartment-id"],
+        "vmClusterId": ["vm-cluster-id"],
+        "page": ["page-2"],
+    }
+
+
+def test_oci_cli_compartment_list_requests_all_pages() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_compartments("tenancy-id") == []
+    assert "--all" in runner.commands[0]
+
+
+def test_log_analytics_associated_entity_list_requests_all_pages() -> None:
+    runner = FakeRunner('{"data": []}')
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_log_analytics_associated_entities("namespace", "compartment-id") == []
+    command = runner.commands[0]
+    assert command[5:8] == ["log-analytics", "assoc", "list-associated-entities"]
+    assert "--all" in command
+
+
+def test_log_analytics_entity_source_association_list_requests_all_pages_for_exact_entity() -> None:
+    runner = FakeRunner('{"data": {"items": [{"sourceName": "DBAlertLogSource", "entityId": "entity"}]}}')
+    oci = OciCli("DEFAULT", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_log_analytics_entity_source_associations("namespace", "compartment-id", "entity") == [
+        {"sourceName": "DBAlertLogSource", "entityId": "entity"}
+    ]
+
+    command = runner.commands[0]
+    assert command[5:8] == ["log-analytics", "assoc", "list-entity-source-assocs"]
+    assert ["--entity-id", "entity"] == command[command.index("--entity-id"):command.index("--entity-id") + 2]
+    assert "--all" in command
 
 
 def test_oci_cli_extracts_nested_items_response() -> None:
@@ -190,6 +341,71 @@ def test_oci_cli_data_safe_list_and_get_command_shapes() -> None:
     assert oci_get.get_data_safe_target("dst-1") == {"id": "dst-1"}
     cmd = runner_get.commands[0]
     assert cmd[5:9] == ["data-safe", "target-database", "get", "--target-database-id"]
+
+
+def test_oci_cli_data_safe_audit_event_summary_command_shape() -> None:
+    runner = FakeRunner('{"data": {"items": []}}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+
+    assert oci.list_data_safe_audit_events("compartment-id", "2026-06-24T09:00:00Z", "2026-06-24T10:00:00Z") == []
+
+    cmd = runner.commands[0]
+    assert cmd[5:8] == ["data-safe", "audit-event-summary", "list-audit-events"]
+    assert "--scim-query" in cmd
+
+
+def test_oci_cli_log_analytics_command_shapes(tmp_path) -> None:
+    runner = FakeRunner('{"data": {"namespace-name": "logan-ns", "id": "resource-id"}}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    oci.profile_tenancy = lambda: "tenancy-id"  # type: ignore[method-assign]
+    payload = tmp_path / "association.json"
+    payload.write_text("[{}]")
+
+    runner.outputs = ['{"data": "logan-ns"}', '{"data": {"namespace-name": "logan-ns", "id": "resource-id"}}']
+    assert oci.get_log_analytics_namespace("compartment-id") == "logan-ns"
+    runner.outputs = ['{"data": "logan-ns"}', '{"data": {"namespace-name": "logan-ns", "id": "resource-id"}}']
+    assert oci.onboard_log_analytics_namespace("compartment-id") == "logan-ns"
+    runner.outputs = ['{"data": {"items": []}}', '{"data": {"namespace-name": "logan-ns", "id": "resource-id"}}']
+    assert oci.create_log_analytics_log_group("logan-ns", "compartment-id", "dbman-logs") == "resource-id"
+    runner.outputs = ['{"data": {"status": "accepted"}}', '{"data": {"namespace-name": "logan-ns", "id": "resource-id"}}']
+    oci.upsert_log_analytics_association("logan-ns", "compartment-id", str(payload))
+    assert oci.search_log_analytics(
+        "logan-ns",
+        "* | stats count",
+        compartment_id="compartment-id",
+        time_start="2026-06-25T10:00:00Z",
+        time_end="2026-06-25T11:00:00Z",
+        limit=25,
+    ) == {
+        "namespace-name": "logan-ns",
+        "id": "resource-id",
+    }
+
+    assert runner.commands[0][5:8] == ["os", "ns", "get"]
+    assert runner.commands[1][5:8] == ["log-analytics", "namespace", "get"]
+    assert runner.commands[2][5:8] == ["os", "ns", "get"]
+    assert runner.commands[3][5:8] == ["log-analytics", "namespace", "onboard"]
+    assert runner.commands[5][5:8] == ["log-analytics", "log-group", "create"]
+    assert runner.commands[6][5:8] == ["log-analytics", "assoc", "upsert-assocs"]
+    assert "--compartment-id" in runner.commands[6]
+    assert "--items" in runner.commands[6]
+    assert runner.commands[7][5:8] == ["log-analytics", "query", "search"]
+    assert "--query-string" in runner.commands[7]
+    assert "--time-start" in runner.commands[7]
+    assert "--time-end" in runner.commands[7]
+    assert "--limit" in runner.commands[7]
+
+
+def test_oci_cli_log_analytics_list_methods_unwrap_items() -> None:
+    runner = FakeRunner('{"data": {"items": [{"name": "item"}]}}')
+    oci = OciCli("cap", "eu-frankfurt-1", runner)  # type: ignore[arg-type]
+    oci.profile_tenancy = lambda: "tenancy-id"  # type: ignore[method-assign]
+
+    assert oci.list_log_analytics_log_groups("logan-ns", "compartment-id") == [{"name": "item"}]
+    assert oci.list_log_analytics_entities("logan-ns", "compartment-id") == [{"name": "item"}]
+    assert oci.list_log_analytics_sources("logan-ns") == [{"name": "item"}]
+    assert oci.list_log_analytics_warnings("logan-ns", "compartment-id") == [{"name": "item"}]
+    assert runner.commands[2][5:8] == ["log-analytics", "source", "list-sources"]
 
 
 class _FailingRunner:

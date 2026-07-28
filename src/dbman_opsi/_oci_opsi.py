@@ -1,7 +1,7 @@
 """Operations Insights: private endpoints and database insights.
 
 The per-lifecycle-state union in ``list_opsi_database_insights_complete`` works
-around an observed OPSI list control-plane flap on cap/eu-frankfurt-1 — see the
+around an observed OPSI list control-plane flap on demo region — see the
 method docstrings for the root-cause notes (kept verbatim; they encode hard-won
 operational knowledge).
 """
@@ -14,6 +14,30 @@ from dbman_opsi._oci_base import _OciBase
 
 
 class OpsiCommands(_OciBase):
+    def disable_opsi_database_insight(self, insight_id: str) -> None:
+        """Disable one run-owned insight; ownership is enforced by lifecycle planning."""
+
+        self.run([
+            "opsi", "database-insights", "disable",
+            "--database-insight-id", insight_id,
+        ])
+
+    def delete_opsi_database_insight(self, insight_id: str) -> None:
+        """Delete a disabled, run-owned insight when an approved cleanup needs it."""
+
+        self.run([
+            "opsi", "database-insights", "delete",
+            "--database-insight-id", insight_id,
+            "--force",
+        ])
+
+    def delete_opsi_private_endpoint(self, endpoint_id: str) -> None:
+        self.run([
+            "opsi", "opsi-private-endpoint", "delete",
+            "--opsi-private-endpoint-id", endpoint_id,
+            "--force",
+        ])
+
     # OPSI database-insights list excludes FAILED/terminal states by default, so
     # the non-ACTIVE states are queried explicitly to surface broken insights
     # during validate.
@@ -53,7 +77,7 @@ class OpsiCommands(_OciBase):
     def list_opsi_database_insights(self, compartment_id: str) -> list[dict[str, Any]]:
         """List OPSI database insights across all relevant lifecycle states.
 
-        Root-cause note (cap, eu-frankfurt-1): combining the full ``--lifecycle-state``
+        Root-cause note (demo, eu-frankfurt-1): combining the full ``--lifecycle-state``
         set with ``--all`` in a *single* call makes the OPSI list control plane
         flap — it intermittently returns an empty or partial page for the same
         compartment (observed bouncing between 0, 2, and 7 items call-to-call).
@@ -117,7 +141,7 @@ class OpsiCommands(_OciBase):
         """Get a single OPSI database insight by its OCID.
 
         Unlike the aggregated ``database-insights list`` (which flaps between
-        empty/partial/full on the cap control plane), a single-resource GET by
+        empty/partial/full on the demo control plane), a single-resource GET by
         insight OCID is reliable — the authoritative way to read an insight's
         lifecycle/connection state once its OCID is known.
         """

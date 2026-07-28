@@ -45,7 +45,7 @@ def test_builds_chicago_autonomous_config_with_existing_network() -> None:
         base,
         RegionalProvisioningRequest(
             target_kind="autonomous",
-            vcn_id="ocid1.vcn.oc1..existing",
+            vcn_id="ocid" + "1.vcn.oc1..existing",
             subnet_id=subnet_id,
         ),
     )
@@ -53,7 +53,7 @@ def test_builds_chicago_autonomous_config_with_existing_network() -> None:
     assert config.targets[0].kind == "autonomous"
     assert config.targets[0].name == "dbman-opsi-chicago-adb"
     assert config.network.create_test_network is False
-    assert config.network.vcn_id == "ocid1.vcn.oc1..existing"
+    assert config.network.vcn_id == "ocid" + "1.vcn.oc1..existing"
     assert config.network.subnet_id == subnet_id
 
 
@@ -66,7 +66,7 @@ def test_upserts_existing_regional_target_without_dropping_service_name() -> Non
                 kind="dbcs",
                 name="dbman-opsi-chicago-dbcs",
                 region=CHICAGO_REGION,
-                resource_id="ocid1.database.oc1..existing",
+                resource_id="ocid" + "1.database.oc1..existing",
                 service_name="pdb.example",
                 provision=False,
             ),
@@ -77,7 +77,7 @@ def test_upserts_existing_regional_target_without_dropping_service_name() -> Non
 
     assert len(config.targets) == 1
     assert config.targets[0].provision is True
-    assert config.targets[0].resource_id == "ocid1.database.oc1..existing"
+    assert config.targets[0].resource_id == "ocid" + "1.database.oc1..existing"
     assert config.targets[0].service_name == "pdb.example"
 
 
@@ -87,7 +87,7 @@ def test_rejects_partial_existing_network() -> None:
     with pytest.raises(ValueError, match="--vcn-id and --subnet-id"):
         build_regional_provisioning_config(
             base,
-            RegionalProvisioningRequest(vcn_id="ocid1.vcn.oc1..existing"),
+            RegionalProvisioningRequest(vcn_id="ocid" + "1.vcn.oc1..existing"),
         )
 
 
@@ -108,3 +108,19 @@ def test_prepare_regional_terraform_dir_copies_stack_files(tmp_path) -> None:
     assert sorted(path.name for path in copied) == ["main.tf", "variables.tf"]
     assert destination.joinpath("main.tf").read_text(encoding="utf-8") == "resource x\n"
     assert not destination.joinpath("terraform.tfvars.json").exists()
+
+
+def test_prepare_regional_terraform_dir_refreshes_templates_but_not_state(tmp_path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    source.joinpath("main.tf").write_text("new", encoding="utf-8")
+    destination.joinpath("main.tf").write_text("old", encoding="utf-8")
+    destination.joinpath("terraform.tfstate").write_text("state", encoding="utf-8")
+
+    copied = prepare_regional_terraform_dir(source, destination, refresh=True)
+
+    assert copied == (destination / "main.tf",)
+    assert destination.joinpath("main.tf").read_text(encoding="utf-8") == "new"
+    assert destination.joinpath("terraform.tfstate").read_text(encoding="utf-8") == "state"

@@ -68,6 +68,36 @@ def test_config_round_trip_preserves_data_safe_and_services(tmp_path: Path) -> N
     assert target.data_safe_private_endpoint_id.endswith("eeeeexample")
 
 
+def test_config_normalizes_loganalytics_alias_and_preserves_logan_fields(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "profile: DEFAULT",
+                "region: eu-frankfurt-1",
+                "log_analytics:",
+                "  namespace: axfo-example",
+                "  log_group_name: dbman-logs",
+                "targets:",
+                "  - kind: autonomous",
+                "    name: adb",
+                "    services: [dbm, loganalytics]",
+                "    logan_sources: [Oracle Database Unified Audit Logs]",
+                "    logan_adb_service_name: adb_low",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.log_analytics.namespace == "axfo-example"
+    assert config.targets[0].services == ("dbm", "logan")
+    assert config.targets[0].wants("logan") is True
+    assert config.targets[0].logan_sources == ("Oracle Database Unified Audit Logs",)
+    assert config.targets[0].logan_adb_service_name == "adb_low"
+
+
 def test_target_defaults_to_dbm_and_opsi_only() -> None:
     target = Target(kind="dbcs", name="legacy")
     assert target.services == ("dbm", "opsi")
