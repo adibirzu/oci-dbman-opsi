@@ -455,4 +455,15 @@ compartment values redacted:
 
 ## Resource Manager Path
 
-Use the Deploy to Oracle Cloud button in the repository README to launch the Terraform stack in any tenant. Resource Manager provisions only OCI-side prerequisites. Database credentials and database-side SQL execution remain explicit workshop steps.
+Use the Deploy to Oracle Cloud button in the repository README to launch the
+validated prerequisite stack. The button downloads the generated
+`resource-manager-stack` package rather than the full repository. Resource
+Manager can create lifecycle-owned PoC/Demo networking, Vault/key, and selected
+service private endpoints, or reuse reviewed existing resources.
+
+Production mode forbids disposable network creation. IAM remains owner-reviewed
+and disabled by default. Database credentials, exact fleet selection,
+database-side SQL, service enablement, Management Agents, Log Analytics source
+associations, and collection proof remain explicit CLI/workshop steps. See the
+[Resource Manager deployment guide](../resource-manager.md) before applying or
+destroying the stack.

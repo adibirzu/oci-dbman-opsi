@@ -1,0 +1,105 @@
+name: Resource Manager stack
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/resource-manager-stack.yml"
+      - "docs/resource-manager.md"
+      - "scripts/build-resource-manager-stack.sh"
+      - "scripts/validate_resource_manager_schema.py"
+      - "terraform/examples/zero-start-poc/**"
+      - "terraform/modules/dbm-opsi-enablement/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/resource-manager-stack.yml"
+      - "docs/resource-manager.md"
+      - "scripts/build-resource-manager-stack.sh"
+      - "scripts/validate_resource_manager_schema.py"
+      - "terraform/examples/zero-start-poc/**"
+      - "terraform/modules/dbm-opsi-enablement/**"
+  workflow_dispatch:
+
+concurrency:
+  group: resource-manager-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-package:
+    name: Build and validate ORM package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install schema dependency
+        run: pip install 'PyYAML>=6.0.1,<7'
+
+      - name: Set up minimum supported Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+          terraform_wrapper: false
+
+      - name: Assemble self-contained stack
+        run: scripts/build-resource-manager-stack.sh "${RUNNER_TEMP}/resource-manager-stack"
+
+      - name: Validate schema and package boundary
+        run: |
+          scripts/validate_resource_manager_schema.py "${RUNNER_TEMP}/resource-manager-stack"
+          terraform -chdir="${RUNNER_TEMP}/resource-manager-stack" fmt -check -recursive
+
+      - name: Create reviewed package artifact
+        run: |
+          cd "${RUNNER_TEMP}/resource-manager-stack"
+          zip -q -r "${RUNNER_TEMP}/dbman-opsi-resource-manager.zip" .
+
+      - name: Validate Terraform
+        run: |
+          terraform -chdir="${RUNNER_TEMP}/resource-manager-stack" init -backend=false -input=false
+          terraform -chdir="${RUNNER_TEMP}/resource-manager-stack" validate
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbman-opsi-resource-manager
+          path: ${{ runner.temp }}/dbman-opsi-resource-manager.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-package-branch:
+    name: Publish deploy-button package branch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble clean stack
+        run: scripts/build-resource-manager-stack.sh "${RUNNER_TEMP}/resource-manager-stack"
+
+      - name: Publish generated branch
+        env:
+          PACKAGE_DIR: ${{ runner.temp }}/resource-manager-stack
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan resource-manager-stack
+          git rm -rf .
+          cp -R "${PACKAGE_DIR}/." .
+          git add .
+          git commit -m "build: publish Resource Manager stack from ${GITHUB_SHA}"
+          git push --force origin resource-manager-stack
