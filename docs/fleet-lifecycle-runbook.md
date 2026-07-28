@@ -88,11 +88,13 @@ dbman-opsi onboard --region <REGION> --answers fleet-answers.local.yaml \
 
 # Re-run after human review using the exact printed plan ID.
 dbman-opsi onboard --region <REGION> --answers fleet-answers.local.yaml \
-  --non-interactive --approval <EXACT_PLAN_ID> --state .fleet-state/fleet.sqlite
+  --non-interactive --approval <EXACT_PLAN_ID> --state .fleet-state/fleet.sqlite \
+  --handoff-key .fleet-state/handoff.key --handoff-dir generated/fleet-handoffs
 
 # Resume only the checkpoint-safe phases of a known run.
 dbman-opsi resume --region <REGION> --run-id <RUN_ID> --approval <EXACT_PLAN_ID> \
-  --state .fleet-state/fleet.sqlite --instance-principal
+  --state .fleet-state/fleet.sqlite --instance-principal \
+  --handoff-key .fleet-state/handoff.key --handoff-dir generated/fleet-handoffs
 
 # Sanitized lifecycle status (human Markdown or machine JSON).
 dbman-opsi fleet-status --region <REGION> --run-id <RUN_ID> --json \
@@ -131,6 +133,12 @@ or partial cleanup; `3` blocked onboarding; `4` exact approval mismatch; `5` inv
 input/policy; `6` missing run or plan; and `10` plan-only. A `collecting` status may
 return `0` while explicitly remaining short of live collection acceptance; inspect
 the verdict and required evidence rather than using the process status alone.
+
+Normal resume re-enters pending, retryable, or handed-off phases and never
+replays completed phases. After remediating a non-authorization terminal
+failure, `resume --retry-failed` explicitly reopens failed phases and children
+that were blocked by those failed dependencies for the same exact approved
+plan. It does not reopen authorization blocks.
 
 ## Handoffs, resume, and cleanup
 
