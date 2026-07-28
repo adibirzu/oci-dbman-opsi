@@ -1,0 +1,46 @@
+name: Sync Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/wiki/**
+      - .github/workflows/sync-wiki.yml
+  workflow_dispatch:
+
+# Required to push the repository-owned GITHUB_TOKEN to the separate Wiki Git
+# repository. The workflow copies only docs/wiki/ and never handles secrets.
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Publish Wiki pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out documentation source
+        uses: actions/checkout@v4
+
+      - name: Check out Wiki repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          persist-credentials: false
+
+      - name: Mirror versioned Wiki pages
+        run: |
+          rsync -a --delete --exclude .git docs/wiki/ wiki/
+
+      - name: Commit and push if pages changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git -C wiki config user.name "github-actions[bot]"
+          git -C wiki config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C wiki add --all
+          if git -C wiki diff --cached --quiet; then
+            exit 0
+          fi
+          git -C wiki commit -m "docs: sync repository Wiki"
+          git -C wiki push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" HEAD:master
