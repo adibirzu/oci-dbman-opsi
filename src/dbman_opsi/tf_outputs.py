@@ -33,6 +33,7 @@ def merge_outputs_into_config(config: EnablementConfig, outputs: dict[str, Any])
 
     changes: list[str] = []
     network = config.network
+    vault = config.vault
     subnet_id = _value(outputs, "subnet_ocid")
     vcn_id = _value(outputs, "vcn_ocid")
     if subnet_id and subnet_id != network.subnet_id:
@@ -41,6 +42,14 @@ def merge_outputs_into_config(config: EnablementConfig, outputs: dict[str, Any])
     if vcn_id and vcn_id != network.vcn_id:
         network = replace(network, vcn_id=vcn_id)
         changes.append("network.vcn_id")
+    vault_id = _value(outputs, "vault_ocid")
+    key_id = _value(outputs, "key_ocid")
+    if vault_id and vault_id != vault.vault_id:
+        vault = replace(vault, vault_id=vault_id)
+        changes.append("vault.vault_id")
+    if key_id and key_id != vault.key_id:
+        vault = replace(vault, key_id=key_id)
+        changes.append("vault.key_id")
 
     pe_id = _value(outputs, "db_management_private_endpoint_ocid")
     dbcs_ids = _value(outputs, "provisioned_dbcs_ids") or {}
@@ -61,7 +70,7 @@ def merge_outputs_into_config(config: EnablementConfig, outputs: dict[str, Any])
             target = replace(target, **updates)
         new_targets.append(target)
 
-    merged = replace(config, network=network, targets=tuple(new_targets))
+    merged = replace(config, network=network, vault=vault, targets=tuple(new_targets))
     return merged, changes
 
 

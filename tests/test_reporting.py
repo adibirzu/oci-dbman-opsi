@@ -59,7 +59,6 @@ def test_check_result_blocking_semantics() -> None:
 
 def test_print_configure_lists_data_safe_decisions(capsys) -> None:
     from dbman_opsi.datasafe import DataSafeDecision
-    from dbman_opsi.reporting import print_inventory
 
     report = ConfigureReport(
         mode="apply",

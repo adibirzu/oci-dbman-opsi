@@ -212,6 +212,74 @@ def test_wizard_captures_data_safe_selection_for_dbcs(monkeypatch) -> None:
     assert target.data_safe_private_endpoint_id == "datasafe-pe-id"
 
 
+def test_wizard_captures_full_observability_service_selection_for_demo_db(monkeypatch) -> None:
+    answers = iter(
+        [
+            "tenancy-id",
+            "1",          # compartment
+            "no",         # create network? no
+            "1",          # vcn
+            "1",          # subnet
+            "no",         # create vault? no
+            "1",          # vault
+            "1",          # key
+            "",           # add a target? (default yes)
+            "dbcs",       # kind
+            "no",         # provision? no
+            "1",          # select database
+            "",           # target name default
+            "",           # service name default
+            "",           # monitoring user
+            "1",          # password secret
+            "1",          # dbm private endpoint
+            "1",          # opsi private endpoint
+            "dbm,opsi,datasafe,logan",  # full demo services
+            "1",          # data safe private endpoint
+            "no",         # discover PDBs? no
+            "no",         # add another target? no
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda prompt: next(answers))
+
+    config = run_wizard("cap", "eu-frankfurt-1", DbcsOci())  # type: ignore[arg-type]
+
+    assert config.targets[0].services == ("dbm", "opsi", "datasafe", "logan")
+    assert config.targets[0].wants("logan") is True
+
+
+def test_wizard_normalizes_loganalytics_service_alias(monkeypatch) -> None:
+    answers = iter(
+        [
+            "tenancy-id",
+            "1",          # compartment
+            "no",         # create network? no
+            "1",          # vcn
+            "1",          # subnet
+            "no",         # create vault? no
+            "1",          # vault
+            "1",          # key
+            "",           # add a target? (default yes)
+            "dbcs",       # kind
+            "no",         # provision? no
+            "1",          # select database
+            "",           # target name default
+            "",           # service name default
+            "",           # monitoring user
+            "1",          # password secret
+            "1",          # dbm private endpoint
+            "1",          # opsi private endpoint
+            "dbm,loganalytics",  # compatibility alias
+            "no",         # discover PDBs? no
+            "no",         # add another target? no
+        ]
+    )
+    monkeypatch.setattr(builtins, "input", lambda prompt: next(answers))
+
+    config = run_wizard("cap", "eu-frankfurt-1", DbcsOci())  # type: ignore[arg-type]
+
+    assert config.targets[0].services == ("dbm", "logan")
+
+
 def test_wizard_falls_back_when_discovery_fails(monkeypatch) -> None:
     class BrokenOci:
         def list_compartments(self, tenancy_id):
@@ -387,7 +455,7 @@ class GroupIdPolicyOci(ProfileTenancyOci):
         return [
             {
                 "statements": [
-                    "Allow group id ocid1.group.oc1..aaaaexample to manage database-family in tenancy",
+                    "Allow group id ocid" + "1.group.oc1..aaaaexample to manage database-family in tenancy",
                     "Allow service dpd to read secret-family in tenancy",
                     "Allow service operations-insights to read secret-family in tenancy",
                 ]
@@ -395,7 +463,7 @@ class GroupIdPolicyOci(ProfileTenancyOci):
         ]
 
     def get_group(self, group_id):
-        assert group_id == "ocid1.group.oc1..aaaaexample"
+        assert group_id == "ocid" + "1.group.oc1..aaaaexample"
         return {"name": "oci-demo-service-group"}
 
 
@@ -417,4 +485,4 @@ def test_wizard_resolves_policy_group_ocids(monkeypatch, capsys) -> None:
     assert config.policy_group_name == "oci-demo-service-group"
     out = capsys.readouterr().out
     assert "oci-demo-service-group" in out
-    assert "ocid1.group" not in out
+    assert "ocid" + "1.group" not in out

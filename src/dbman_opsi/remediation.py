@@ -73,7 +73,7 @@ REMEDIATIONS: tuple[Remediation, ...] = (
     ),
     Remediation(
         "NotAuthorizedOrNotFound",
-        "Either a transient control-plane 404 (cap dbmgmt/opsi endpoints flap) or a missing IAM policy.",
+        "Either a transient control-plane 404 (demo dbmgmt/opsi endpoints flap) or a missing IAM policy.",
         "Retry once; if it persists, add the Database Management IAM policy for the secret/named credential.",
         "Policy: Allow any-user to read secret-family in compartment <C> where ALL "
         "{target.secret.id='<secret>', request.principal.type='dbmgmtmanageddatabase'}. "

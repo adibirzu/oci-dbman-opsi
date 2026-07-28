@@ -1,6 +1,8 @@
-# Workshop: Enable OCI Database Management And Operations Insights
+# Workshop: Enable OCI Database Observability And Security
 
-This workshop walks through an end-to-end enablement flow for Database Management and Operations Insights across DBCS, Autonomous Database, Exadata, and external database targets.
+Owning product requirement: [Demo Orchestration](../product/prd-demo-orchestration.md).
+
+This workshop walks through an end-to-end enablement flow for Database Management, Operations Insights, Data Safe, and optional Log Analytics across DBCS, Autonomous Database, Exadata, and external database targets.
 
 Use placeholders for every tenancy value. Do not paste real OCIDs, hostnames, usernames, or credentials into workshop notes.
 
@@ -31,9 +33,11 @@ dbman-opsi plan --profile <OCI_PROFILE> --region <OCI_REGION> --output dbman-ops
 ```
 
 For each target the wizard asks **which pillars to enable** — `dbm` (Database
-Management), `opsi` (Operations Insights), and/or `datasafe` (Data Safe). The
-default is `dbm`+`opsi`; add `datasafe` to also register the database as a Data
-Safe target (Lab 6). PDB targets inherit their parent CDB's pillar selection.
+Management), `opsi` (Operations Insights), `datasafe` (Data Safe), and/or
+`logan` (Log Analytics). The default is `dbm`+`opsi`; add `datasafe` to register
+the database as a Data Safe target (Lab 6), and add `logan` to configure Log
+Analytics source/entity associations (Lab 7). PDB targets inherit their parent
+CDB's pillar selection.
 The wizard searches the selected compartment first, then other accessible
 compartments, because workshop resources are often split across database,
 network, observability, and security compartments.
@@ -95,6 +99,8 @@ It reports PASS/FAIL/WARN/MANUAL for each of:
 - Vault secret holding the monitoring password
 - Monitoring database user and grants (verified DB-side — marked MANUAL)
 - External targets: Management Agent registered with `dbmgmt` and `opsi` plugins
+- Log Analytics targets: namespace/log group, Management Agent readiness, entity
+  IDs, and ADB wallet/collector reminders
 
 A `FAIL` includes the exact remediation. Use `--json` to feed an automation runner.
 
@@ -152,6 +158,7 @@ Generate Operations Insights payloads and fill any placeholders:
 
 ```bash
 dbman-opsi generate-opsi-payloads --config dbman-opsi.local.yaml --output generated/opsi-payloads
+dbman-opsi generate-logan-payloads --config dbman-opsi.local.yaml --output generated/logan
 ```
 
 Enable services. The orchestrated path runs the prerequisite gate first, skips
@@ -162,7 +169,7 @@ dbman-opsi configure --config dbman-opsi.local.yaml              # plan: gate on
 dbman-opsi configure --config dbman-opsi.local.yaml --apply      # enable DBM + OPSI when ready
 ```
 
-To enable **all three pillars in one pass**, add `--with-data-safe` (Data Safe is
+To enable **Data Safe** in the same pass, add `--with-data-safe` (Data Safe is
 registered for targets that opted into `datasafe`, after DBM/OPSI):
 
 ```bash
@@ -170,6 +177,13 @@ export DBMAN_OPSI_DBSNMP_PASSWORD='<prompted-value>'
 dbman-opsi configure --config dbman-opsi.local.yaml --apply \
   --with-data-safe --data-safe-password-env DBMAN_OPSI_DBSNMP_PASSWORD
 unset DBMAN_OPSI_DBSNMP_PASSWORD
+```
+
+To include **Log Analytics** source associations in the same pass, add
+`--with-log-analytics`. It only affects targets that opted into `logan`:
+
+```bash
+dbman-opsi configure --config dbman-opsi.local.yaml --apply --with-log-analytics
 ```
 
 If a DBA must run the database steps separately, generate handoff packets instead
@@ -232,11 +246,133 @@ For Data Masking / Data Discovery, also run the per-target privilege script from
 the OCI Console (Data Safe > Target databases > Register > Download Privilege
 Script).
 
+## Lab 7: Enable Log Analytics (optional observability pillar)
+
+For targets that opted into `logan`, use Management Agent collection and Log
+Analytics source/entity associations. DBCS/Exadata collection runs on the DB VM;
+Autonomous Database collection uses a private collector host with TCPS wallet
+credentials. Do not put install keys, wallets, DB passwords, or generated
+credential JSON into Terraform state or committed files.
+
+Generate the local packet:
+
+```bash
+dbman-opsi generate-logan-payloads --config dbman-opsi.local.yaml --output generated/logan
+```
+
+For DBCS/Exadata, run the generated host scripts on the DB VM:
+
+```bash
+cd generated/logan/<target>
+./00-discover-logan-host-facts.sh
+./01-grant-logan-log-acls.sh /var/log/messages /var/log/secure /var/log/audit/audit.log
+```
+
+If the DB VM is only reachable from an operator machine or demo jumphost, use
+the generated Management Agent Ansible bundle instead:
+
+```bash
+cd generated/logan/<target>
+./03-create-logan-management-agent-install-key.sh
+./07-bootstrap-logan-management-agent-ansible.sh
+PACKAGE_INFO="$(./11-resolve-logan-management-agent-package-url.sh)"
+AGENT_RPM_URL="$(printf '%s\n' "$PACKAGE_INFO" | sed -n 's/^AGENT_RPM_URL=//p')"
+AGENT_RPM_SHA256="$(printf '%s\n' "$PACKAGE_INFO" | sed -n 's/^AGENT_RPM_SHA256=//p')"
+TARGET_HOST='<DB_HOST_OR_COLLECTOR_HOST>' \
+TARGET_USER=opc \
+SSH_KEY='<PRIVATE_KEY_PATH>' \
+AGENT_RPM_URL="$AGENT_RPM_URL" \
+AGENT_RPM_SHA256="$AGENT_RPM_SHA256" \
+INSTALL_KEY_FILE='./<target>-mgmt-agent-install-key.rsp' \
+./08-run-logan-management-agent-ansible.sh
+./06-resolve-logan-management-agent.sh
+```
+
+Then run `02-create-logan-db-user.sql` as a DBA and replace the placeholder
+password with a rotated local secret. For Autonomous Database, place the wallet
+on the private collector host and register local `DBTCPSCreds` with the
+Management Agent credential tool; delete temporary credential JSON after
+registration.
+
+Apply the OCI-side namespace/log-group/source association workflow:
+
+```bash
+dbman-opsi log-analytics --config dbman-opsi.local.yaml                 # dry-run
+dbman-opsi log-analytics --config dbman-opsi.local.yaml --apply         # live
+```
+
+Validation summarizes warning counts and query counts by target/source without
+printing raw log rows:
+
+```bash
+dbman-opsi validate --config dbman-opsi.local.yaml
+```
+
+## Lab 8: DB Incident Troubleshooting Demo
+
+This lab is for demo databases only. It creates a disposable `DBINC_LAB` schema,
+generates safe real Oracle errors, captures SQL and PL/SQL diagnostics, and then
+uses Log Analytics plus DBM, OPSI, Data Safe, OCI Audit, LoganAI, and
+`oci-coordinator-oke` agents for correlation.
+
+Prepare the local demo packet:
+
+```bash
+export PROFILE='<OCI_PROFILE>'
+export REGION='<OCI_REGION>'
+export CONFIG='<IGNORED_DEMO_CONFIG_PATH>'
+export DATABASE_NAME='<DEMO_DATABASE_NAME>'
+export SCENARIO_ID='<DEMO_SCENARIO_ID>'
+
+scripts/demo-db-incident-e2e.sh tasks
+scripts/demo-db-incident-e2e.sh prereq
+scripts/demo-db-incident-e2e.sh generate
+scripts/demo-db-incident-e2e.sh package
+```
+
+Run the packet on a demo jumphost or DB host where SQL*Plus/SQLcl can reach the
+database listener:
+
+```bash
+export DEMO_JUMPHOST_HOST='<DEMO_JUMPHOST_HOST_OR_IP>'
+export DEMO_JUMPHOST_SSH_KEY='<PRIVATE_KEY_PATH>'
+export DB_INCIDENT_ADMIN_CONNECT='<DEMO_ADMIN_CONNECT_STRING>'
+export DB_INCIDENT_LAB_PASSWORD='<DISPOSABLE_PASSWORD>'
+export DB_INCIDENT_SAMPLE_SCHEMAS_ENABLED=true
+
+scripts/demo-db-incident-e2e.sh jumphost-copy
+scripts/demo-db-incident-e2e.sh jumphost-preflight
+scripts/demo-db-incident-e2e.sh jumphost-run
+```
+
+After Management Agent ingests the DB/host logs, verify Log Analytics and build
+the evidence bundle:
+
+```bash
+scripts/demo-db-incident-e2e.sh logan-scenario-check
+scripts/demo-db-incident-e2e.sh logan-check
+```
+
+Ask LoganAI for fast source coverage and ask `oci-coordinator-oke` `/chat` for
+the handoff answer:
+
+```text
+What happened around ORA-00600 on <DEMO_DATABASE_NAME> in the last 24 hours?
+Correlate Log Analytics, DBM, OPSI, OCI Audit, and Data Safe.
+Show timeline, repetition, impact, likely hypotheses, missing sources, next diagnostics, and SR evidence package.
+```
+
+The expected answer should distinguish direct ORA/alert-log evidence from DBM,
+OPSI, Audit, and Data Safe context. It should also call out missing sources and
+uncertainty instead of turning a matching error code into a definitive root
+cause.
+
 ## What success looks like (OCI Console)
 
 These redacted captures (region/account band and compartment chip blurred) show the
-end state after the labs — two Base Database systems (`DBMOPSI`/`PDB1` and a
-freshly-provisioned `dbmanops`/`dbmanops_pdb1`) with all three pillars on.
+end state after the labs — two Base Database systems (`<DEMO_CDB_NAME>`/`<DEMO_PDB_NAME>` and a
+freshly-provisioned `<DEMO_CDB_NAME>`/`<DEMO_PDB_NAME>`) with DBM, OPSI, and Data Safe on.
+Log Analytics is optional and validated through warning/query-count summaries.
 
 **Database Management — Managed Databases** (Lab 5). Both container DBs and their
 PDBs show **Enabled / Full** under ADVANCED management:
@@ -248,7 +384,7 @@ live CPU / storage / Average-Active-Sessions metrics:
 
 ![Fleet diagnostics summary](../screenshots/console-02-dbmopsi-summary.png)
 
-**Database summary — Pluggable Databases tab** (Lab 5). `PDB1` **Up** with live
+**Database summary — Pluggable Databases tab** (Lab 5). `<DEMO_PDB_NAME>` **Up** with live
 Performance Hub metrics; the *Performance Hub / ADDM Spotlight / AWR Explorer*
 actions are available (no privilege prompt, thanks to scripts `03`/`05`):
 
@@ -260,8 +396,7 @@ SQL, service names, and users):
 
 ![Performance Hub](../screenshots/console-05-performance-hub.png)
 
-**Data Safe — Target databases** (Lab 6). The registered targets are **Active**
-(`dbman-opsi-dbcs-PDB1`, `dbman-opsi-dbcs2-cdb`, `dbman-opsi-dbcs2-PDB1`):
+**Data Safe — Target databases** (Lab 6). The registered demo targets are **Active**:
 
 ![Data Safe target databases](../screenshots/console-04-data-safe-targets.png)
 

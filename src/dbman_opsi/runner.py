@@ -32,6 +32,10 @@ class OciNotFound(OciError):
     """Requested OCI resource was not found."""
 
 
+class OciAlreadyDone(OciError):
+    """OCI explicitly reports that the requested cleanup transition already happened."""
+
+
 class OciThrottled(OciError):
     """OCI throttled the request."""
 
@@ -177,10 +181,14 @@ class CommandRunner:
 
 def _classify_oci_error(stderr: str, message: str) -> OciError:
     normalized = stderr.lower()
+    # OCI's NotAuthorizedOrNotFound code is deliberately authorization
+    # ambiguous. Cleanup must fail closed rather than infer deletion from it.
     if any(marker in normalized for marker in ("notauthenticated", "forbidden", "not authorized", "notauthorized")):
         return OciAuthError(message)
     if "notfound" in normalized or "not found" in normalized or re.search(r"\b404\b", normalized):
         return OciNotFound(message)
+    if any(marker in normalized for marker in ("alreadydisabled", "already disabled", "alreadydeleted", "already deleted")):
+        return OciAlreadyDone(message)
     if "toomanyrequests" in normalized or "throttl" in normalized or re.search(r"\b429\b", normalized):
         return OciThrottled(message)
     if (

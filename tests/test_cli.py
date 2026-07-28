@@ -40,6 +40,127 @@ def test_cli_generate_agent_scripts(tmp_path: Path) -> None:
 
     assert main(["generate-agent-scripts", "--config", str(config_path), "--output", str(output_dir)]) == 0
     assert (output_dir / "external-agent.sh").exists()
+    assert (output_dir / "external-agent-verify.sh").exists()
+    assert (output_dir / "external-agent-create-install-key.sh").exists()
+    assert (output_dir / "external-agent-resolve-package-url.sh").exists()
+    assert (output_dir / "external-agent-resolve.sh").exists()
+    assert (output_dir / "external-agent-ansible-bootstrap.sh").exists()
+    assert (output_dir / "external-agent-ansible-run.sh").exists()
+    assert (output_dir / "external-agent-ansible-playbook.yml").exists()
+    assert (output_dir / "external-agent-ansible.cfg").exists()
+
+
+def test_cli_generate_agent_scripts_for_logan_enabled_dbcs(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "agents"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            targets=(
+                Target(
+                    kind="dbcs",
+                    name="native db",
+                    service_name="PDB1",
+                    services=("dbm", "opsi", "logan"),
+                    logan_hostname="dbhost.example.internal",
+                ),
+            ),
+        ),
+    )
+
+    assert main(["generate-agent-scripts", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "native-db-agent.sh").exists()
+    assert (output_dir / "native-db-agent-verify.sh").exists()
+    assert (output_dir / "native-db-agent-create-install-key.sh").exists()
+    assert (output_dir / "native-db-agent-resolve-package-url.sh").exists()
+    assert (output_dir / "native-db-agent-resolve.sh").exists()
+    assert (output_dir / "native-db-agent-ansible-bootstrap.sh").exists()
+    assert (output_dir / "native-db-agent-ansible-run.sh").exists()
+    assert (output_dir / "native-db-agent-ansible-playbook.yml").exists()
+    assert (output_dir / "native-db-agent-ansible.cfg").exists()
+
+
+def test_cli_generate_db_incident_demo(tmp_path: Path) -> None:
+    output_dir = tmp_path / "db-incident-demo"
+
+    assert main(["generate-db-incident-demo", "--output", str(output_dir)]) == 0
+
+    assert (output_dir / "synthetic-db-incident.jsonl").exists()
+    assert "Dry run" in (output_dir / "02-generate-safe-errors.sql").read_text(encoding="utf-8")
+
+
+def test_cli_generates_credential_free_sqlcl_mcp_template(tmp_path: Path) -> None:
+    output = tmp_path / "sqlcl-mcp.json"
+
+    assert (
+        main(
+            [
+                "generate-sqlcl-mcp",
+                "--output",
+                str(output),
+                "--connect-descriptor",
+                "<ADB_CONNECT_DESCRIPTOR>",
+                "--secret-id",
+                SECRET_ID,
+            ]
+        )
+        == 0
+    )
+
+    rendered = json.loads(output.read_text(encoding="utf-8"))
+    server = rendered["mcpServers"]["sqlcl-readonly"]
+    assert server["env"]["DBMAN_OPSI_SECRET_ID"] == SECRET_ID
+    assert "password" not in output.read_text(encoding="utf-8").lower()
+
+
+def test_cli_generates_disposable_release_assets(tmp_path: Path) -> None:
+    output = tmp_path / "release"
+
+    assert main(["generate-disposable-assets", "--output", str(output), "--lifecycle-id", "demo-test"]) == 0
+
+    assert (output / "bootstrap-dedicated-users.sql").exists()
+    assert len(list((output / "dashboards").glob("*.json"))) == 6
+    evidence = json.loads((output / "release-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["verdict"] == "failed"
+    assert evidence["retention_days"] == 7
+
+
+def test_cli_renders_single_role_reset_plan_as_json(capsys) -> None:
+    assert main(["credential-reset-plan", "--role", "MCP_READONLY", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["role"] == "MCP_READONLY"
+    assert "generate password in process memory" in payload["steps"]
+    assert "secret_value" not in payload
+
+
+def test_cli_db_incident_json_can_emit_empty_bounded_bundle(capsys) -> None:
+    assert (
+        main(
+            [
+                "db-incident",
+                "--profile",
+                "DEFAULT",
+                "--region",
+                "eu-frankfurt-1",
+                "--ora-code",
+                "ORA-00600",
+                "--include-sources",
+                "",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["workflow"] == "db_incident_analysis"
+    assert payload["request"]["ora_code"] == "ORA-00600"
+    assert payload["timeline"] == []
+    assert "not a root cause by itself" in payload["uncertainty"]
 
 
 def test_cli_provision_render_only(tmp_path: Path) -> None:
@@ -89,7 +210,7 @@ def test_cli_init_region_writes_chicago_provisioning_config(tmp_path: Path, caps
     save_config(
         base_config,
         EnablementConfig(
-            profile="cap",
+            profile="demo",
             region="eu-frankfurt-1",
             tenancy_id=TENANCY_ID,
             compartment_id=COMPARTMENT_ID,
@@ -110,7 +231,7 @@ def test_cli_init_region_writes_chicago_provisioning_config(tmp_path: Path, caps
     ) == 0
 
     generated = load_config(output_config)
-    assert generated.profile == "cap"
+    assert generated.profile == "demo"
     assert generated.region == "us-chicago-1"
     assert generated.network.create_test_network is True
     assert generated.terraform_dir == str(tmp_path / "zero-start-poc-us-chicago-1")
@@ -122,7 +243,7 @@ def test_cli_init_region_writes_chicago_provisioning_config(tmp_path: Path, caps
 
 def test_cli_init_region_requires_complete_existing_network(tmp_path: Path) -> None:
     base_config = tmp_path / "base.yaml"
-    save_config(base_config, EnablementConfig(profile="cap", region="eu-frankfurt-1"))
+    save_config(base_config, EnablementConfig(profile="demo", region="eu-frankfurt-1"))
 
     with pytest.raises(SystemExit, match="--vcn-id and --subnet-id"):
         main(["init-region", "--config", str(base_config), "--vcn-id", VCN_ID])
@@ -272,6 +393,70 @@ def test_cli_generate_opsi_payloads(tmp_path: Path) -> None:
     assert (output_dir / "cloud-db" / "credential-details.json").exists()
 
 
+def test_cli_generate_logan_payloads(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    output_dir = tmp_path / "logan"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            targets=(
+                Target(
+                    kind="dbcs",
+                    name="cloud db",
+                    service_name="PDB1",
+                    services=("dbm", "opsi", "logan"),
+                    logan_sources=("Linux Syslog Logs",),
+                    management_agent_id="ocid" + "1.managementagent.oc1..aaaaaaaa",
+                ),
+            ),
+        ),
+    )
+
+    assert main(["generate-logan-payloads", "--config", str(config_path), "--output", str(output_dir)]) == 0
+    assert (output_dir / "cloud-db" / "associations" / "linuxsyslogsource.json").exists()
+
+
+def test_cli_log_analytics_dry_run_generates_evidence_dir(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    evidence_dir = tmp_path / "evidence"
+    payload_dir = tmp_path / "payloads"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            targets=(
+                Target(
+                    kind="dbcs",
+                    name="cloud db",
+                    service_name="PDB1",
+                    services=("dbm", "opsi", "logan"),
+                    logan_sources=("Linux Syslog Logs",),
+                    management_agent_id="ocid" + "1.managementagent.oc1..aaaaaaaa",
+                ),
+            ),
+        ),
+    )
+
+    assert main(
+        [
+            "log-analytics",
+            "--config",
+            str(config_path),
+            "--payload-dir",
+            str(payload_dir),
+            "--evidence-dir",
+            str(evidence_dir),
+        ]
+    ) == 0
+
+    assert evidence_dir.exists()
+    assert "log-analytics cloud db: configured" in capsys.readouterr().out
+
+
 def test_cli_generate_opsi_diagnostics(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     output_dir = tmp_path / "opsi-diagnostics"
@@ -295,7 +480,7 @@ def test_cli_cross_region_updates_config_and_prints_poc_steps(tmp_path: Path, ca
     save_config(
         config_path,
         EnablementConfig(
-            profile="cap",
+            profile="demo",
             region="eu-frankfurt-1",
             targets=(
                 Target(kind="dbcs", name="frankfurt-cdb", service_name="cdb.example"),
@@ -512,6 +697,100 @@ def test_cli_configure_apply_can_skip_preferred_credentials(tmp_path: Path, monk
     assert captured["credentials_called"] is False
 
 
+def test_cli_configure_json_includes_log_analytics_decisions(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            tenancy_id=TENANCY_ID,
+            compartment_id=COMPARTMENT_ID,
+            targets=(
+                Target(
+                    kind="dbcs",
+                    name="cloud db",
+                    resource_id=DATABASE_ID,
+                    service_name="PDB1",
+                    services=("dbm", "opsi", "logan"),
+                ),
+            ),
+        ),
+    )
+
+    class FakeConfigure:
+        def __init__(self, oci, enablement=None, datasafe=None) -> None:
+            pass
+
+        def configure(self, config, mode="plan", handoff_dir="x", force=False):
+            return ConfigureReport(
+                mode=mode,
+                preflight=PreflightReport(),
+                decisions=(TargetDecision("cloud db", "dbcs", "oci-native", "planned", "ok"),),
+            )
+
+    class FakeLogAnalytics:
+        def __init__(self, oci) -> None:
+            pass
+
+        def enable_all(self, config, onboard_namespace=False):
+            from dbman_opsi.log_analytics import LogAnalyticsDecision
+
+            return [LogAnalyticsDecision("cloud db", "configured", "source association payloads applied")]
+
+    monkeypatch.setattr("dbman_opsi.cli.ConfigureService", FakeConfigure)
+    monkeypatch.setattr("dbman_opsi.cli.LogAnalyticsService", FakeLogAnalytics)
+
+    assert main(["configure", "--config", str(config_path), "--with-log-analytics", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["log_analytics"][-1]["target"] == "cloud db"
+
+
+def test_cli_log_analytics_redacts_identifier_bearing_decision_detail(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    save_config(
+        config_path,
+        EnablementConfig(
+            profile="DEFAULT",
+            region="eu-frankfurt-1",
+            compartment_id=COMPARTMENT_ID,
+            targets=(Target(kind="dbcs", name="cloud db", service_name="PDB1", services=("logan",)),),
+        ),
+    )
+    raw_namespace = "fr4" + "zqfimuxtr"
+    raw_ocid = "ocid1" + ".loganalyticsloggroup.oc1.eu-frankfurt-1." + ("a" * 32)
+
+    class FakeLogAnalytics:
+        def __init__(self, oci) -> None:
+            pass
+
+        def enable_all(self, config, **kwargs):
+            from dbman_opsi.log_analytics import LogAnalyticsDecision
+
+            return [LogAnalyticsDecision("cloud db", "configured", f"namespace={raw_namespace}; id={raw_ocid}")]
+
+    monkeypatch.setattr("dbman_opsi.cli.LogAnalyticsService", FakeLogAnalytics)
+
+    assert main(
+        [
+            "log-analytics",
+            "--config",
+            str(config_path),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+            "--payload-dir",
+            str(tmp_path / "payloads"),
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert raw_namespace not in output
+    assert raw_ocid not in output
+    assert "${OCIR_TENANCY}" in output
+    assert "<OCI_OCID>" in output
+
+
 def test_cli_import_tf_outputs_merges_and_writes(tmp_path: Path, monkeypatch) -> None:
     from dbman_opsi.config import load_config
 
@@ -693,7 +972,7 @@ def test_cli_db_exec_plan_non_prod(tmp_path: Path, capsys) -> None:
     save_config(
         config_path,
         EnablementConfig(
-            profile="cap",
+            profile="demo",
             region="eu-frankfurt-1",
             targets=(Target(kind="dbcs", name="dbmopsi", service_name="PDB1"),),
         ),
@@ -710,7 +989,7 @@ def test_cli_db_exec_plan_production_hands_off(tmp_path: Path, capsys) -> None:
     save_config(
         config_path,
         EnablementConfig(
-            profile="emdemo",
+            profile="production",
             region="us-phoenix-1",
             targets=(Target(kind="dbcs", name="dbmopsi", service_name="PDB1"),),
         ),

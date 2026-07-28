@@ -3,8 +3,8 @@
 The toolkit generates DB-side SQL (monitoring user, grants, Performance Hub,
 Data Safe) but does not run it by default. This module adds an opt-in executor
 that *auto-runs* those scripts against the database in non-production tenancies
-(e.g. the ``cap`` staging tenancy) while staying generate-and-handoff for
-production (``emdemo``), where running SQL automatically is unsafe.
+(e.g. the ``demo`` staging tenancy) while staying generate-and-handoff for
+production profiles, where running SQL automatically is unsafe.
 
 The actual SQL transport (Bastion port-forward -> ssh -> sqlplus) is injected as
 a ``sql_runner`` callback so the gating/orchestration is testable without a live
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,13 @@ from dbman_opsi.db_scripts import DB_SCRIPT_TARGETS
 
 # Production tenancies where DB-side SQL must never be auto-executed; these always
 # fall back to handoff. Keyed by OCI CLI profile name.
-PROD_PROFILES = frozenset({"emdemo"})
+DEFAULT_PROD_PROFILES = frozenset({"production"})
+
+
+def _prod_profiles() -> frozenset[str]:
+    configured = os.environ.get("DBMAN_OPSI_PROD_PROFILES", "")
+    values = [value.strip() for value in configured.split(",") if value.strip()]
+    return frozenset(values) if values else DEFAULT_PROD_PROFILES
 
 # Runs a target's ordered SQL scripts and returns combined output. Raising is
 # allowed and surfaces as a failed decision.
@@ -43,7 +50,7 @@ class ExecDecision:
 
 
 def is_production_profile(profile: str) -> bool:
-    return profile in PROD_PROFILES
+    return profile in _prod_profiles()
 
 
 def should_auto_execute(profile: str, force: bool = False) -> bool:

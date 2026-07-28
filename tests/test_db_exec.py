@@ -13,12 +13,12 @@ from dbman_opsi.db_exec import (
 
 
 def test_production_profile_gate() -> None:
-    assert is_production_profile("emdemo") is True
-    assert is_production_profile("cap") is False
-    assert should_auto_execute("cap") is True
-    assert should_auto_execute("emdemo") is False
+    assert is_production_profile("production") is True
+    assert is_production_profile("demo") is False
+    assert should_auto_execute("demo") is True
+    assert should_auto_execute("production") is False
     # Force overrides the prod gate (explicit operator override).
-    assert should_auto_execute("emdemo", force=True) is True
+    assert should_auto_execute("production", force=True) is True
 
 
 def test_ordered_scripts_returns_existing_in_run_order(tmp_path: Path) -> None:
@@ -43,13 +43,13 @@ def _config(profile: str) -> EnablementConfig:
 
 
 def test_plan_auto_execs_non_prod_and_skips_non_db_kinds() -> None:
-    decisions = {d.target: d for d in DbExecService().plan(_config("cap"))}
+    decisions = {d.target: d for d in DbExecService().plan(_config("demo"))}
     assert decisions["dbmopsi"].action == "executed"
     assert decisions["adb"].action == "skipped"  # autonomous has no DB-side scripts
 
 
 def test_plan_hands_off_in_production() -> None:
-    decisions = {d.target: d for d in DbExecService().plan(_config("emdemo"))}
+    decisions = {d.target: d for d in DbExecService().plan(_config("production"))}
     assert decisions["dbmopsi"].action == "handoff"
 
 
@@ -64,7 +64,7 @@ def test_execute_runs_scripts_via_injected_runner(tmp_path: Path) -> None:
         ran.append((target.name, [p.name for p in scripts]))
         return "ok"
 
-    decisions = DbExecService(runner).execute(_config("cap"), tmp_path)
+    decisions = DbExecService(runner).execute(_config("demo"), tmp_path)
     by_target = {d.target: d for d in decisions}
     assert by_target["dbmopsi"].action == "executed"
     assert ran == [("dbmopsi", ["01-create-monitoring-user.sql", "04-validate-monitoring-user.sql"])]
@@ -81,7 +81,7 @@ def test_execute_in_production_hands_off_without_running(tmp_path: Path) -> None
         called = True
         return "ok"
 
-    decisions = {d.target: d for d in DbExecService(runner).execute(_config("emdemo"), tmp_path)}
+    decisions = {d.target: d for d in DbExecService(runner).execute(_config("production"), tmp_path)}
     assert decisions["dbmopsi"].action == "handoff"
     assert called is False
 
@@ -94,14 +94,14 @@ def test_execute_marks_failed_runner_without_aborting(tmp_path: Path) -> None:
     def runner(target: Target, scripts: list[Path]) -> str:
         raise RuntimeError("ORA-12514")
 
-    decisions = {d.target: d for d in DbExecService(runner).execute(_config("cap"), tmp_path)}
+    decisions = {d.target: d for d in DbExecService(runner).execute(_config("demo"), tmp_path)}
     assert decisions["dbmopsi"].action == "failed"
     assert "ORA-12514" in decisions["dbmopsi"].detail
 
 
 def test_execute_auto_without_runner_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        DbExecService().execute(_config("cap"), tmp_path)
+        DbExecService().execute(_config("demo"), tmp_path)
 
 
 def test_exec_decision_to_dict() -> None:
