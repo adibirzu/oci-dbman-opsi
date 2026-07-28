@@ -18,9 +18,16 @@ def render_tfvars(config: EnablementConfig) -> dict[str, object]:
             "resource_id": target.resource_id,
             "provision": target.provision,
             "management_type": target.management_type,
+            "services": list(target.services),
+            "logan_database_entity_id": target.logan_database_entity_id,
+            "logan_host_entity_id": target.logan_host_entity_id,
+            "logan_listener_entity_id": target.logan_listener_entity_id,
+            "logan_adb_entity_id": target.logan_adb_entity_id,
+            "logan_management_agent_id": target.logan_management_agent_id,
         }
         for target in config.targets
     ]
+    logan_enabled = any(target.wants("logan") for target in config.targets)
     return {
         "tenancy_ocid": config.tenancy_id,
         "compartment_ocid": config.compartment_id,
@@ -34,6 +41,13 @@ def render_tfvars(config: EnablementConfig) -> dict[str, object]:
         "create_vault": config.vault.create_vault,
         "vault_ocid": config.vault.vault_id,
         "key_ocid": config.vault.key_id,
+        "enable_log_analytics": logan_enabled,
+        "log_analytics_namespace": config.log_analytics.namespace,
+        "log_analytics_onboard_namespace": config.log_analytics.onboard_namespace,
+        "log_analytics_log_group_ocid": config.log_analytics.log_group_id,
+        "log_analytics_log_group_name": config.log_analytics.log_group_name,
+        "log_analytics_create_log_group": config.log_analytics.create_log_group,
+        "log_analytics_create_adb_collector": config.log_analytics.create_adb_collector,
         "targets": target_payload,
         **terraform_policy_documents(config),
     }

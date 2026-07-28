@@ -16,6 +16,7 @@ from dbman_opsi._oci_datasafe import DataSafeCommands
 from dbman_opsi._oci_dbmgmt import DatabaseManagementCommands
 from dbman_opsi._oci_iam import IamCommands
 from dbman_opsi._oci_infra import InfraCommands
+from dbman_opsi._oci_loganalytics import LogAnalyticsCommands
 from dbman_opsi._oci_network import NetworkCommands
 from dbman_opsi._oci_opsi import OpsiCommands
 from dbman_opsi._oci_vault import VaultCommands
@@ -32,6 +33,7 @@ class OciCli(
     DatabaseManagementCommands,
     OpsiCommands,
     DataSafeCommands,
+    LogAnalyticsCommands,
 ):
     """Flat OCI CLI client composed from per-domain command mixins.
 

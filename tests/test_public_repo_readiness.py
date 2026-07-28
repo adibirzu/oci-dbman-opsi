@@ -13,7 +13,9 @@ def test_readme_has_resource_manager_button_and_workshop_entrypoint() -> None:
 
     assert "cloud.oracle.com/resourcemanager/stacks/create" in readme
     assert "Deploy to Oracle Cloud" in readme
+    assert "github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/main.zip" in readme
     assert "docs/workshop/README.md" in readme
+    assert "docs/blog-opsi-poc-update.md" in readme
     assert "Cloud Shell" in readme
 
 
@@ -37,9 +39,11 @@ def test_workshop_docs_cover_end_to_end_paths_without_tenant_names() -> None:
 def test_resource_manager_schema_exists_for_public_stack() -> None:
     schema = read("terraform/examples/zero-start-poc/schema.yaml")
 
-    assert "title: OCI DB Management and Ops Insights Enablement" in schema
+    assert "title: OCI Database Observability and Security Enablement" in schema
     assert "tenancy_ocid" in schema
     assert "compartment_ocid" in schema
+    assert "enable_log_analytics" in schema
+    assert "log_analytics_log_group_name" in schema
     assert "password" not in schema.lower()
 
 
@@ -51,6 +55,7 @@ def test_public_surface_does_not_contain_raw_sensitive_values() -> None:
     public_ip_prefixes = ("130" + ".61.", "161" + ".153.")
     checked_paths = [
         "README.md",
+        "docs/blog-opsi-poc-update.md",
         "docs/workshop/README.md",
         "docs/security.md",
         "terraform/examples/zero-start-poc/main.tf",
@@ -89,3 +94,19 @@ def test_sanitized_screenshots_are_present() -> None:
         screenshot = ROOT / path
         assert screenshot.exists()
         assert screenshot.stat().st_size > 10_000
+
+
+def test_blog_entry_covers_new_opsi_poc_capabilities_and_tests() -> None:
+    blog = read("docs/blog-opsi-poc-update.md")
+
+    for expected in [
+        "Cross-region Ops Insights monitoring",
+        "Chicago DBCS provisioning path",
+        "Advanced diagnostics by default",
+        "Host firewall handoff",
+        "Process Insights diagnostics",
+        "OPSI diagnostic packet",
+        "python -m pytest",
+        "terraform -chdir=terraform/examples/zero-start-poc validate",
+    ]:
+        assert expected in blog

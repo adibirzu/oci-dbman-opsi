@@ -8,6 +8,22 @@ from dbman_opsi._oci_base import _OciBase
 
 
 class DataSafeCommands(_OciBase):
+    def delete_data_safe_target(self, target_database_id: str) -> None:
+        """Remove one target-database registration explicitly owned by this run."""
+
+        self.run([
+            "data-safe", "target-database", "delete",
+            "--target-database-id", target_database_id,
+            "--force",
+        ])
+
+    def delete_data_safe_private_endpoint(self, endpoint_id: str) -> None:
+        self.run([
+            "data-safe", "private-endpoint", "delete",
+            "--private-endpoint-id", endpoint_id,
+            "--force",
+        ])
+
     def list_data_safe_targets(self, compartment_id: str) -> list[dict[str, Any]]:
         """List registered Data Safe target databases in a compartment.
 
@@ -32,6 +48,24 @@ class DataSafeCommands(_OciBase):
         data = self.run_json([
             "data-safe", "private-endpoint", "list",
             "--compartment-id", compartment_id, "--all",
+        ])
+        return self._items(data)
+
+    def list_data_safe_audit_events(
+        self,
+        compartment_id: str,
+        start_time: str,
+        end_time: str,
+    ) -> list[dict[str, Any]]:
+        data = self.run_json([
+            "data-safe",
+            "audit-event-summary",
+            "list-audit-events",
+            "--compartment-id",
+            compartment_id,
+            "--scim-query",
+            f'(auditEventTime ge "{start_time}" and auditEventTime le "{end_time}")',
+            "--all",
         ])
         return self._items(data)
 

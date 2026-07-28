@@ -1,5 +1,5 @@
-title: OCI DB Management and Ops Insights Enablement
-description: Resource Manager stack for enabling OCI Database Management and Operations Insights prerequisites.
+title: OCI Database Observability and Security Enablement
+description: Resource Manager stack for enabling OCI Database Management, Operations Insights, Data Safe, and Log Analytics prerequisites.
 schemaVersion: 1.1.0
 version: "20260603"
 locale: en
@@ -20,6 +20,22 @@ variableGroups:
   - title: Optional Targets
     variables:
       - targets
+      - ssh_public_keys
+  - title: Optional Log Analytics
+    variables:
+      - enable_log_analytics
+      - log_analytics_namespace
+      - log_analytics_onboard_namespace
+      - log_analytics_log_group_ocid
+      - log_analytics_log_group_name
+      - log_analytics_create_log_group
+      - log_analytics_create_adb_collector
+  - title: Disposable Demo Guardrails
+    variables:
+      - demo_lifecycle_id
+      - evidence_retention_days
+      - demo_services
+      - create_vault
       - ssh_public_keys
 
 variables:
@@ -43,6 +59,43 @@ variables:
     type: boolean
     default: true
 
+  demo_lifecycle_id:
+    title: Unique Demo Lifecycle ID
+    type: string
+    required: true
+    description: Required ownership tag. Use a unique value for every demo so teardown affects only this stack.
+
+  evidence_retention_days:
+    title: Sanitized Evidence Retention Days
+    type: integer
+    default: 7
+    required: true
+    description: Demo evidence retention target. Do not store credentials or topology in retained evidence.
+
+  demo_services:
+    title: Demo Service Pillars
+    type: array
+    items:
+      type: enum
+      values:
+        - dbm
+        - opsi
+        - datasafe
+        - logan
+    default:
+      - dbm
+      - opsi
+      - datasafe
+      - logan
+    required: true
+    description: Select the OCI services to demonstrate. DB-side accounts, Vault secrets, firewall rules, and readiness checks are required before service enablement.
+
+  create_vault:
+    title: Create Disposable Vault and KMS Key
+    type: boolean
+    default: true
+    description: Creates lifecycle-managed Vault/KMS resources for demo role secrets. Never put plaintext credential values in stack variables.
+
   vcn_ocid:
     title: Existing VCN OCID
     type: oci_vcn
@@ -60,12 +113,12 @@ variables:
   test_vcn_cidr:
     title: Workshop VCN CIDR
     type: string
-    default: 10.44.0.0/16
+    required: false
 
   test_subnet_cidr:
     title: Workshop Private Subnet CIDR
     type: string
-    default: 10.44.10.0/24
+    required: false
 
   targets:
     title: Target Descriptor List
@@ -81,3 +134,37 @@ variables:
       type: string
     required: false
 
+  enable_log_analytics:
+    title: Enable Log Analytics Intent
+    type: boolean
+    default: false
+
+  log_analytics_namespace:
+    title: Existing Log Analytics Namespace
+    type: string
+    required: false
+
+  log_analytics_onboard_namespace:
+    title: Onboard Log Analytics Namespace In CLI Workflow
+    type: boolean
+    default: false
+
+  log_analytics_log_group_ocid:
+    title: Existing Log Analytics Log Group OCID
+    type: string
+    required: false
+
+  log_analytics_log_group_name:
+    title: Log Analytics Log Group Name
+    type: string
+    default: dbman-opsi-logan
+
+  log_analytics_create_log_group:
+    title: Create Or Reuse Log Analytics Log Group In CLI Workflow
+    type: boolean
+    default: true
+
+  log_analytics_create_adb_collector:
+    title: Reserve Private ADB Collector Host Intent
+    type: boolean
+    default: false

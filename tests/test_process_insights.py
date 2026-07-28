@@ -19,7 +19,7 @@ class FakeOci:
         return [
             {
                 "id": "host-insight-id",
-                "host-name": "dbmanopsi",
+                "host-name": "demo-db-host",
                 "host-type": "COMANAGED-VM-HOST",
                 "lifecycle-state": "ACTIVE",
                 "status": "ENABLED",

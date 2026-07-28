@@ -113,8 +113,18 @@ def _append_region(regions: tuple[str, ...], region: str) -> tuple[str, ...]:
     return (*regions, region)
 
 
-def prepare_regional_terraform_dir(source_dir: str | Path, destination_dir: str | Path) -> tuple[Path, ...]:
-    """Create a sibling Terraform workdir with the zero-start stack files."""
+def prepare_regional_terraform_dir(
+    source_dir: str | Path,
+    destination_dir: str | Path,
+    *,
+    refresh: bool = False,
+) -> tuple[Path, ...]:
+    """Create or refresh a sibling Terraform workdir from the current template.
+
+    Generated state, provider caches, and tfvars are deliberately excluded. A
+    refresh updates only versioned ``.tf`` and Resource Manager schema files,
+    keeping regional deployment templates aligned without copying state.
+    """
 
     source = Path(source_dir)
     destination = Path(destination_dir)
@@ -126,7 +136,7 @@ def prepare_regional_terraform_dir(source_dir: str | Path, destination_dir: str 
         if path.suffix != ".tf" and path.name != "schema.yaml":
             continue
         target = destination / path.name
-        if target.exists():
+        if target.exists() and not refresh:
             continue
         copy2(path, target)
         copied.append(target)

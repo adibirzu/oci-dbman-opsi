@@ -9,6 +9,7 @@ from dbman_opsi.journal import RunJournal
 from dbman_opsi.runner import (
     CommandRunner,
     CommandResult,
+    OciAlreadyDone,
     OciAuthError,
     OciError,
     OciNotFound,
@@ -78,6 +79,9 @@ def test_runner_redacts_failed_command() -> None:
         ("ServiceError: Forbidden: missing policy", OciAuthError),
         ("ServiceError: NotFound: target database not found", OciNotFound),
         ("ServiceError: 404: target not found", OciNotFound),
+        ("ServiceError: NotAuthorizedOrNotFound: target gone", OciAuthError),
+        ("ServiceError: AlreadyDisabled: DBM is disabled", OciAlreadyDone),
+        ("ServiceError: 409 Conflict: resource in use", OciError),
         ("ServiceError: TooManyRequests: retry later", OciThrottled),
         ("ServiceError: 429: request throttled", OciThrottled),
         ("ServiceError: 503 Service Unavailable", OciTransient),

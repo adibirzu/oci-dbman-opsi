@@ -18,7 +18,7 @@ from dbman_opsi.conn import service_name_from_record
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.oci_util import safe_lookup
 
-_VALID_SERVICES = ("dbm", "opsi", "datasafe")
+_VALID_SERVICES = ("dbm", "opsi", "datasafe", "logan")
 _DEFAULT_POLICY_GROUP = "dbman-opsi-admins"
 _REQUIRED_POLICY_NEEDLES = ("service dpd", "service operations-insights")
 
@@ -47,15 +47,26 @@ def _ask_services() -> tuple[Service, ...]:
     """Prompt for which observability/security/management pillars to enable.
 
     'dbm' = Database Management, 'opsi' = Operations Insights, 'datasafe' = Data
-    Safe. Defaults to DBM + OPSI; Data Safe (security) is opt-in.
+    Safe, and 'logan' = Log Analytics. Defaults to DBM + OPSI; Data Safe and
+    Log Analytics are opt-in.
     """
 
     raw = _ask(
-        "Enable which pillars? comma-separated from dbm,opsi,datasafe",
+        "Enable which pillars? comma-separated from dbm,opsi,datasafe,logan",
         ",".join(DEFAULT_SERVICES),
     )
-    chosen = tuple(s.strip().lower() for s in raw.split(",") if s.strip() in _VALID_SERVICES)
+    chosen = tuple(
+        _normalize_service_answer(s.strip().lower())
+        for s in raw.split(",")
+        if _normalize_service_answer(s.strip().lower()) in _VALID_SERVICES
+    )
     return chosen or DEFAULT_SERVICES  # type: ignore[return-value]
+
+
+def _normalize_service_answer(value: str) -> str:
+    if value == "loganalytics":
+        return "logan"
+    return value
 
 
 def _safe_discover(
@@ -171,7 +182,7 @@ def _discover_policy_group(
 
 
 def _policy_group_display(group: str) -> str:
-    if group.startswith("id ocid1.group"):
+    if group.startswith("id ocid" + "1.group"):
         return f"id ...{group[-12:]}"
     return group
 

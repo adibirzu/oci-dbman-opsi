@@ -120,6 +120,21 @@ class DataSafeService:
         if not compartment:
             return DataSafeDecision(target.name, "blocked", "missing compartment_id")
 
+        # Re-running an observability deployment must not prompt for a database
+        # password when the target has already been registered. Confirm the saved
+        # identifier is still present in the current compartment before treating
+        # it as an idempotent success.
+        existing_targets = self.oci.list_data_safe_targets(compartment)
+        if target.data_safe_target_id and any(
+            item.get("id") == target.data_safe_target_id for item in existing_targets
+        ):
+            return DataSafeDecision(
+                target.name,
+                "enabled",
+                "Data Safe target already registered",
+                target.data_safe_target_id,
+            )
+
         # Resolve (or create) the Data Safe private endpoint for non-autonomous targets.
         pe_id = target.data_safe_private_endpoint_id
         if target.kind != "autonomous" and not pe_id:

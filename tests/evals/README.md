@@ -1,7 +1,7 @@
 # Eval-First Harness
 
 A small, fixture-driven regression fence for the `dbman-opsi` enablement logic.
-Every defect found by live testing against the cap tenancy is encoded here so it
+Every defect found by live testing against the demo tenancy is encoded here so it
 can never silently return. Evals are organized by **defect/risk**, not by module,
 so they survive refactors.
 
