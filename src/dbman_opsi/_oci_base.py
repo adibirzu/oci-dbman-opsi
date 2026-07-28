@@ -49,8 +49,8 @@ class _OciBase:
             self.run(args)
             return True
         except OciError as exc:
-            message = str(exc)
-            if any(marker in message for marker in tolerated):
+            message = str(exc).lower()
+            if any(marker.lower() in message for marker in tolerated):
                 return False
             raise
 

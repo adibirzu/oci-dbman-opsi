@@ -251,13 +251,16 @@ class LifecycleOperations:
         # substitute a database OCID for the actual insight OCID.
         if not target.compartment_id or not target.resource_id:
             return None
-        try:
-            insights = self.oci.list_opsi_database_insights(target.compartment_id)
-        except (AttributeError, RuntimeError):
-            return None
-        for insight in insights:
-            if insight.get("database-id") == target.resource_id and isinstance(insight.get("id"), str):
-                return insight["id"]
+        for attempt in range(3):
+            try:
+                insights = self.oci.list_opsi_database_insights(target.compartment_id)
+            except (AttributeError, RuntimeError):
+                insights = []
+            for insight in insights:
+                if insight.get("database-id") == target.resource_id and isinstance(insight.get("id"), str):
+                    return insight["id"]
+            if attempt < 2:
+                time.sleep(2**attempt)
         return None
 
     def validation(self, plan: TargetPlan) -> PhaseOutcome:
