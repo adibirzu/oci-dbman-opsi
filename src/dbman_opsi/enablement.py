@@ -142,10 +142,7 @@ class EnablementService:
         separate approved phases, so a DBM-only plan can never create OPSI.
         """
         self.enable_dbm(target, force_reconcile=force_reconcile)
-        # Older callers treated an unbound Autonomous insight as DBM-only;
-        # preserve that API while lifecycle callers receive a durable handoff.
-        if target.kind != "autonomous" or target.opsi_database_insight_id:
-            self.enable_opsi(target)
+        self.enable_opsi(target)
 
     def enable_dbm(self, target: Target, force_reconcile: bool = False) -> bool:
         if target.kind == "autonomous":
@@ -159,14 +156,23 @@ class EnablementService:
 
     def enable_opsi(self, target: Target) -> bool:
         if target.kind == "autonomous":
-            if not target.opsi_database_insight_id:
-                raise ValueError("autonomous OPSI requires an existing Database Insight ID or signed handoff")
-            self.oci.run([
-                "opsi", "database-insights", "enable-autonomous-database",
-                "--database-insight-id", target.opsi_database_insight_id,
-                "--is-advanced-features-enabled", "false",
-            ])
-            return True
+            if target.opsi_database_insight_id:
+                return self.oci.run_tolerating([
+                    "opsi", "database-insights", "enable-autonomous-database",
+                    "--database-insight-id", target.opsi_database_insight_id,
+                    "--is-advanced-features-enabled", "false",
+                    "--wait-for-state", "SUCCEEDED",
+                ], tolerated=self.OPSI_ALREADY_ENABLED_MARKERS)
+            if not target.resource_id:
+                raise ValueError(f"Target {target.name} is missing resource_id")
+            # The Database service owns the basic Autonomous OPSI lifecycle and
+            # creates the Database Insight when one does not exist. This avoids
+            # requiring an insight OCID before the enable operation that creates it.
+            return self.oci.run_tolerating([
+                "db", "autonomous-database", "enable-operations-insights",
+                "--autonomous-database-id", target.resource_id,
+                "--wait-for-state", "SUCCEEDED",
+            ], tolerated=self.OPSI_ALREADY_ENABLED_MARKERS)
         if target.kind not in {"dbcs", "exadata"}:
             return False
         return self._enable_opsi_pe_comanaged_if_ready(target)
@@ -181,7 +187,7 @@ class EnablementService:
             "--autonomous-database-id",
             target.resource_id,
         ], tolerated=self.DBM_ALREADY_ENABLED_MARKERS)
-        if enable_opsi and target.opsi_database_insight_id:
+        if enable_opsi:
             self.enable_opsi(target)
         return applied
 
@@ -189,6 +195,11 @@ class EnablementService:
     # already on (or its enable request is already in flight). Treated as an
     # idempotent no-op so re-runs proceed to the Ops Insights step.
     DBM_ALREADY_ENABLED_MARKERS = ("already enabled", "already created")
+    OPSI_ALREADY_ENABLED_MARKERS = (
+        "already enabled",
+        "already created",
+        "operations insights is enabled",
+    )
 
     def _enable_cloud_database(self, target: Target, force_reconcile: bool = False, *, enable_opsi: bool = True) -> bool:
         missing = missing_cloud_fields(target)
