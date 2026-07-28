@@ -1,10 +1,22 @@
-# OCI DB Management And Operations Insights Enablement
+# OCI Database Fleet Observability Lifecycle
 
 [![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/main.zip)
 
-`dbman-opsi` is an OCI enablement and lifecycle tool for four
-observability/security pillars — **Database Management (DBM)**, **Operations
-Insights (OPSI)**, **Data Safe**, and **Log Analytics** — across:
+`dbman-opsi` discovers Oracle database fleets and coordinates their OCI
+observability and security lifecycle. An operator answers one questionnaire,
+reviews one immutable plan, approves its exact content hash, and can then
+onboard, resume, inspect, and safely offboard one database or a large fleet.
+
+The product covers four service pillars:
+
+- **Database Management (DBM)** for fleet health, diagnostics, Performance Hub,
+  AWR, ADDM, and administration workflows;
+- **Operations Insights (OPSI)** for long-term capacity, SQL, and resource
+  analysis;
+- **Data Safe** for target registration and database security workflows;
+- **Log Analytics** for alert, listener, audit, trace, and host log collection.
+
+Supported target families include:
 
 - Base Database Service / DBCS
 - Autonomous Database
@@ -23,7 +35,418 @@ fleet lifecycle with read-only discovery, exact-plan approval, checkpointed
 resume, signed DBA/host handoffs, protected state, collection-proof gates, and
 ownership-safe offboarding. This is **not an official Oracle product** or an
 Oracle-supported deployment tool. Production use still requires owner-approved
-access and change control; current live acceptance evidence is owner-gated.
+access and change control; complete release acceptance remains owner-gated.
+
+## Why use it
+
+Enabling one OCI database is usually manageable. Enabling the same controls
+consistently across tens or hundreds of databases is harder because the work
+crosses regions, compartments, CDB/PDB dependencies, Vault references, private
+endpoints, database users, Management Agents, service-specific APIs, and
+different administrative owners.
+
+`dbman-opsi` turns those concerns into one checkpointed lifecycle:
+
+1. **Discover** subscribed regions, accessible compartments, databases, service
+   state, endpoints, Vault, agents, and reusable resources.
+2. **Select** exact targets using questionnaire filters or a private CSV/YAML
+   selection file.
+3. **Plan** services, credential policy, prerequisites, dependencies, risks,
+   and expected resource effects without making OCI changes.
+4. **Approve** the exact SHA-256 plan ID. Any change in answers, selection,
+   bindings, or discovered topology produces a different ID.
+5. **Execute** independent targets with bounded concurrency while preserving
+   CDB-before-PDB ordering.
+6. **Handoff** database or host work through signed, redacted, target-bound
+   packets when the OCI identity does not have that authority.
+7. **Resume** only incomplete or explicitly retryable phases from private
+   durable state.
+8. **Prove collection** before calling a target ready. Registration alone is
+   not accepted as collection evidence.
+9. **Offboard** in reverse dependency order and remove only resources recorded
+   as created or enabled by that run.
+
+## Capabilities at a glance
+
+| Capability | What the tool does | Safety boundary |
+| --- | --- | --- |
+| Whole-tenancy discovery | Reads subscribed regions and accessible active compartments; discovers OCI-native and external database families | Inaccessible or incomplete scope blocks planning instead of looking empty |
+| Fleet selection | Filters by region, compartment, family, lifecycle state, tag, name, current service state, or explicit target IDs | Exclusions win; selected PDBs retain their discovered CDB parent |
+| Deployment modes | Supports `poc`, `demo`, and `production` policy profiles | Production forbids test-database provisioning and database deletion |
+| Service selection | Plans any target-specific combination of `dbm`, `opsi`, `datasafe`, and `logan` | Unselected services are not changed |
+| Credential policy | Models shared username/unique reference, shared username/shared reference, or dedicated username/unique reference | Shared credentials are rejected in production; plaintext credentials are rejected everywhere |
+| Fleet execution | Runs a dependency DAG with regional and service concurrency controls | Independent targets continue; PDBs stop when their CDB parent cannot proceed |
+| Resume and retries | Checkpoints every phase in SQLite and optionally synchronizes state through Object Storage | Completed phases are not replayed; failed phases require explicit `--retry-failed` |
+| DBA/host handoffs | Issues HMAC-signed packets using opaque target handles | Completion evidence must match the run, plan, target, and phase |
+| Collection readiness | Distinguishes configured, collecting, ready, degraded, blocked, and handed-off | DBM/OPSI/Log Analytics proof must be current; OPSI data can take time to appear |
+| Offboarding | Dissociates logs, disables services, removes run-created credentials/endpoints, and optionally removes disposable databases | Reused/preexisting resources are preserved; production databases are never deleted |
+| Evidence and redaction | Produces sanitized status, journals, reports, and bounded incident bundles | Topology and resource references stay in private `0600` state |
+
+## Supported target and execution paths
+
+| Target family | DBM and OPSI path | Database/host authority | Log Analytics path |
+| --- | --- | --- | --- |
+| Base Database CDB/non-CDB | OCI Database service and DBM/OPSI APIs | Vault credential and private endpoint references; DBA SQL may be handed off | Management Agent-backed database, host, and listener entities |
+| Base Database PDB | PDB-specific DBM operation after its CDB parent | Local PDB user or an approved common-user credential group | Uses the approved parent host collector path |
+| Autonomous Database | Autonomous DBM and Database service OPSI lifecycle | Basic service-managed collection needs no database password; advanced access has separate prerequisites | Approved private collector/agent and TCPS path where supported |
+| Exadata Database Service | CDB/PDB-aware OCI-native workflow | Exadata DBA and network authority may be handed off | Management Agent-backed collector path |
+| External Database | External handles plus Management Agent integration | Host administrator and DBA completion evidence is expected | Management Agent entity and source associations |
+| External Exadata | External Exadata/database handles plus agent integration | Host/Exadata administrator handoff is expected | Management Agent entity and source associations |
+
+## Choose the operating path
+
+Use the **fleet lifecycle** when you want one reviewed plan for multiple
+databases, resumability, signed handoffs, aggregate status, and ownership-safe
+cleanup:
+
+```text
+onboard --plan-only → approve plan ID → onboard → fleet-status
+  handed-off → import-handoff → resume
+  failed → remediate → resume --retry-failed
+  collecting → wait/validate or import-collection-evidence → fleet-status
+ready → offboard --plan-only → approve cleanup plan → offboard
+  cleanup handed-off → import-cleanup-handoff → offboard
+```
+
+Use the **expert per-target commands** when you already have a private target
+configuration and want a focused operation such as prerequisite diagnostics,
+payload generation, a single-service change, or incident investigation:
+
+```text
+discover → plan → preflight → configure/enable/log-analytics/data-safe → validate
+```
+
+The two paths share the same lower-level OCI adapters. Existing expert commands
+remain supported; the fleet lifecycle adds orchestration and policy rather than
+replacing them.
+
+## Installation
+
+Supported operator environments are OCI Cloud Shell, a controlled workstation,
+and an automation runner. Python 3.11 or newer and an authenticated OCI CLI are
+required. Terraform 1.5 or newer is needed only for provisioning workflows.
+
+```bash
+git clone https://github.com/adibirzu/oci-dbman-opsi.git
+cd oci-dbman-opsi
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+
+dbman-opsi doctor --profile <OCI_PROFILE> --region <OCI_REGION>
+```
+
+Cloud Shell already includes OCI CLI. The fleet interface supports a named
+profile/security token, instance principal, or resource principal:
+
+```bash
+dbman-opsi onboard --profile <PROFILE> --region <REGION> ...
+dbman-opsi onboard --security-token --region <REGION> ...
+dbman-opsi onboard --instance-principal --region <REGION> ...
+dbman-opsi onboard --resource-principal --region <REGION> ...
+```
+
+## Fleet quick start
+
+### 1. Create a private answer file
+
+Interactive `onboard` asks the same questions when `--answers` is omitted.
+For repeatable or automated runs, save the answers in an ignored file:
+
+```yaml
+# fleet-answers.local.yaml
+deployment_mode: production
+services: [dbm, opsi, logan]
+credential_policy: shared-user-unique-secret
+monitoring_username: DBMAN_MON
+log_preset: alert-listener-audit
+authority_mode: approval-required
+max_concurrency: 4
+retention_days: 7
+common_user: false
+pdb_unique_passwords: false
+provision_test_dbcs: false
+provision_test_autonomous: false
+discovery_filters:
+  regions: []
+  compartments: []
+  kinds: []
+  lifecycle_states: [AVAILABLE]
+  tags: {}
+  name_pattern:
+  service_states: {}
+  target_ids: []
+  exclude_target_ids: []
+  all_discovered: true
+```
+
+```bash
+umask 077
+chmod 600 fleet-answers.local.yaml
+mkdir -p .fleet-state generated/fleet-handoffs generated/fleet-cleanup-handoffs
+chmod 700 .fleet-state generated/fleet-handoffs generated/fleet-cleanup-handoffs
+openssl rand -out .fleet-state/handoff.key 32
+chmod 600 .fleet-state/handoff.key
+```
+
+The answer file contains policy choices, not credentials or tenancy topology.
+Production requires `approval-required`, rejects shared passwords, and rejects
+test-database provisioning.
+
+### 2. Optionally supply exact selection and reference bindings
+
+For large fleets, use filters in the answer file or a private selection file:
+
+```yaml
+# selected-targets.local.yaml
+target_ids:
+  - <TARGET_ID_1>
+  - <TARGET_ID_2>
+```
+
+References that the service adapters need can be supplied separately in a
+private `0600` binding file. Bindings may contain Vault, endpoint, service,
+agent, or existing service-resource references, never plaintext values:
+
+```yaml
+# fleet-bindings.local.yaml
+targets:
+  <TARGET_ID_1>:
+    password_secret_id: <VAULT_SECRET_REFERENCE>
+    private_endpoint_id: <DBM_PRIVATE_ENDPOINT_REFERENCE>
+    service_name: <DATABASE_SERVICE_NAME>
+    management_agent_id: <MANAGEMENT_AGENT_REFERENCE>
+```
+
+Bindings are immutable plan inputs. Adding or changing them after review changes
+the plan ID and requires a new approval. Omit `--selection-file` and
+`--bindings` from the following commands when those optional files are not
+used. Keep any optional files you create private:
+
+```bash
+chmod 600 selected-targets.local.yaml fleet-bindings.local.yaml
+```
+
+### 3. Discover and generate the immutable plan
+
+This performs read-only OCI discovery and prints a sanitized review surface:
+
+```bash
+dbman-opsi onboard \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --answers fleet-answers.local.yaml \
+  --selection-file selected-targets.local.yaml \
+  --bindings fleet-bindings.local.yaml \
+  --non-interactive \
+  --plan-only \
+  --state .fleet-state/fleet.sqlite
+```
+
+Exit code `10` means plan-only completed and no OCI writes occurred. Review the
+mode, scope, selected services and targets, CDB/PDB dependencies, prerequisite
+actions, risks, resource estimates, ownership policy, and exact plan ID.
+
+### 4. Apply only the exact reviewed plan
+
+Re-run with the same profile, region, answers, selection, and bindings:
+
+```bash
+dbman-opsi onboard \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --answers fleet-answers.local.yaml \
+  --selection-file selected-targets.local.yaml \
+  --bindings fleet-bindings.local.yaml \
+  --non-interactive \
+  --approval <EXACT_PLAN_ID> \
+  --state .fleet-state/fleet.sqlite \
+  --handoff-key .fleet-state/handoff.key \
+  --handoff-dir generated/fleet-handoffs
+```
+
+The command refuses to write if current discovery or any immutable input no
+longer produces the approved plan ID. It prints the run ID needed by every later
+status, resume, evidence-import, and offboarding command.
+
+### 5. Inspect, complete handoffs, and resume
+
+```bash
+dbman-opsi fleet-status \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --state .fleet-state/fleet.sqlite \
+  --json
+
+dbman-opsi import-handoff \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --approval <EXACT_PLAN_ID> \
+  --evidence <SIGNED_COMPLETION_FILE> \
+  --handoff-key .fleet-state/handoff.key \
+  --state .fleet-state/fleet.sqlite
+
+dbman-opsi resume \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --approval <EXACT_PLAN_ID> \
+  --state .fleet-state/fleet.sqlite \
+  --handoff-key .fleet-state/handoff.key \
+  --handoff-dir generated/fleet-handoffs
+```
+
+Use `resume --retry-failed` only after remediating a failed adapter or external
+condition. It reopens failed phases and their dependency-blocked children for
+the same exact plan; it does not reopen authorization blocks or replay completed
+phases.
+
+If a supported bounded OCI query cannot provide current collection evidence, an
+approved evidence signer can return a fresh, redacted, service-specific
+completion envelope:
+
+```bash
+dbman-opsi import-collection-evidence \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --approval <EXACT_PLAN_ID> \
+  --evidence <SIGNED_SERVICE_PROOF> \
+  --handoff-key .fleet-state/handoff.key \
+  --state .fleet-state/fleet.sqlite
+```
+
+Collection evidence proves only the selected service observation. It is
+non-owning and cannot grant cleanup authority.
+
+### 6. Review and execute ownership-safe cleanup
+
+```bash
+# Read-only reverse plan.
+dbman-opsi offboard \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --state .fleet-state/fleet.sqlite \
+  --plan-only
+
+# Apply only the exact cleanup plan printed above.
+dbman-opsi offboard \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --state .fleet-state/fleet.sqlite \
+  --approval <EXACT_CLEANUP_PLAN_ID> \
+  --handoff-key .fleet-state/handoff.key \
+  --handoff-dir generated/fleet-cleanup-handoffs
+```
+
+Cleanup dissociates Log Analytics first, then disables OPSI, disables PDB DBM
+before CDB DBM, and removes only supported run-created resources. Reused
+resources are never deleted. PoC/demo database deletion requires the reviewed
+cleanup plan plus `--delete-test-databases` and its displayed typed
+confirmation. Production mode never deletes databases.
+
+When cleanup itself reaches an owner handoff, import the completion against the
+cleanup plan—not the onboarding plan—then repeat the same idempotent offboard:
+
+```bash
+dbman-opsi import-cleanup-handoff \
+  --profile <PROFILE> \
+  --region <HOME_REGION> \
+  --run-id <RUN_ID> \
+  --approval <EXACT_CLEANUP_PLAN_ID> \
+  --evidence <SIGNED_CLEANUP_COMPLETION> \
+  --handoff-key .fleet-state/handoff.key \
+  --state .fleet-state/fleet.sqlite
+```
+
+## Questionnaire and policy choices
+
+### Deployment modes
+
+| Mode | Intended use | Test databases | Cleanup behavior |
+| --- | --- | --- | --- |
+| `poc` | Time-bounded technical validation | May request disposable DBCS and/or Autonomous provisioning through the reviewed provisioning workflow | Cleanup expected; database deletion needs a separate typed confirmation |
+| `demo` | Repeatable scenario or workshop environment | Existing or disposable databases | Same ownership controls as PoC |
+| `production` | Existing customer databases and approved service changes | Forbidden | Service-only offboarding; database deletion forbidden |
+
+### Credential policies
+
+| Policy | Username model | Credential reference model | Availability |
+| --- | --- | --- | --- |
+| `shared-user-unique-secret` | One reviewed monitoring username | Unique Vault reference for every independent database account | Default; all modes |
+| `shared-user-shared-secret` | One username | One shared reference | PoC/demo only, with explicit warning |
+| `dedicated-user-unique-secret` | Deterministic dedicated username per target | Unique Vault reference per target | All modes |
+
+For PDBs, a local user with the same name can be created independently in each
+PDB so credentials can differ. A common CDB user cannot silently have a
+different password in each PDB; choose one common credential group or use local
+PDB users. The lifecycle stores references and ownership effects, not plaintext
+passwords.
+
+### Log presets
+
+- `alert-listener-audit` is the default.
+- `extended` also selects XML alert/audit and listener trace sources.
+- `none` disables log-source selection explicitly.
+
+Source association is not proof of ingestion. The target stays `collecting`
+until current searchable records are observed or accepted through a signed,
+fresh collection-evidence envelope.
+
+## Understanding fleet status
+
+| Verdict | Meaning | Operator action |
+| --- | --- | --- |
+| `configured` | Required configuration phases completed, but collection has not been established | Wait for service propagation and run validation |
+| `collecting` | Service registration/association exists and collection is expected | Verify fresh DBM, OPSI, and Log Analytics observations |
+| `ready` | Every selected service has current collection proof | Retain redacted evidence and continue monitoring |
+| `degraded` | A phase failed or current evidence reports a degraded condition | Remediate, then explicitly retry when appropriate |
+| `blocked` | Dependency, authorization, policy, or required safety condition prevents progress | Resolve the blocker; do not bypass the plan |
+| `handed-off` | Approved DBA/host/resource-owner action is required | Complete and import the matching signed packet |
+
+OPSI registration is not collection proof, and newly enabled OPSI data can take
+up to 24 hours to appear. A process exit code is therefore not a substitute for
+reading the per-target verdict.
+
+## Scale, state, and failure handling
+
+- Discovery is paginated, deterministically ordered, and bounded across regions
+  and compartments.
+- CDB/PDB relationships form an explicit dependency graph. CDBs onboard before
+  PDBs; offboarding reverses the order.
+- Service and region concurrency are configurable from 1 to 8. Conservative
+  values reduce throttling in large fleets.
+- `429`, transient `5xx`, and in-progress conflicts use bounded retry/backoff.
+  Repeated authorization failures open a circuit breaker.
+- Independent targets continue after a target failure. State is checkpointed
+  after every phase transition.
+- Local acceptance tests cover 1, 100, and 1,000 target plans. This validates
+  orchestration behavior, not a universal OCI service quota or live-tenancy
+  performance guarantee.
+- The default state store is private SQLite. Object Storage state with checksum,
+  ETag, and lease protection is available for cross-host resume.
+- Public status uses opaque target handles. Topology, OCIDs, service references,
+  and ownership records remain in ignored `0600` state.
+
+## Documentation map
+
+| Start here when you need to… | Document |
+| --- | --- |
+| Operate the complete production lifecycle | [Production operations guide](docs/production-operations-guide.md) |
+| Understand plan approval, handoffs, state, evidence, and cleanup | [Fleet lifecycle runbook](docs/fleet-lifecycle-runbook.md) |
+| Review architecture and module boundaries | [Architecture](docs/architecture.md) |
+| Run the guided lab | [Workshop](docs/workshop/README.md) |
+| Diagnose a known failure signature | [Troubleshooting knowledge base](KB.md) |
+| Investigate an Oracle database incident | [DB incident troubleshooting](docs/db-incident-troubleshooting.md) |
+| Run the disposable incident demonstration | [End-to-end demo runbook](docs/demo-db-incident-e2e.md) |
+| Configure the Data Safe audit export bridge | [Data Safe to Log Analytics](docs/datasafe-log-analytics.md) |
+| Review security and publication controls | [Security guide](docs/security.md) |
+| See implementation and live release gates | [Product portfolio](docs/product/portfolio.md) |
 
 ## Architecture
 
@@ -78,19 +501,19 @@ Data Safe, Ops Insights capacity dashboards, SQL Insights, DB Performance, and
 the Ops Insights multi-region Data Object Explorer flow:
 [docs/demo-db-incident-e2e.md](docs/demo-db-incident-e2e.md#validation-status).
 
-## Quick Start
+## Expert per-target quick start
+
+Use this path when a private target configuration already exists or when you
+need one focused diagnostic/provisioning operation. For normal multi-database
+onboarding, use the fleet quick start above.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-
 cp .env.local.example .env.local
 chmod 600 .env.local
 # edit .env.local locally; do not commit it
 
 dbman-opsi doctor
-dbman-opsi discover --profile <OCI_PROFILE> --region <OCI_REGION> --compartment <OCID>  # 3-pillar inventory
+dbman-opsi discover --profile <OCI_PROFILE> --region <OCI_REGION> --compartment <OCID>  # service inventory
 dbman-opsi plan --profile <OCI_PROFILE> --region <OCI_REGION> --output dbman-opsi.local.yaml
 dbman-opsi init-region --config dbman-opsi.local.yaml --region us-chicago-1 --target-kind dbcs
 dbman-opsi provision --config dbman-opsi.local.yaml --render-only
