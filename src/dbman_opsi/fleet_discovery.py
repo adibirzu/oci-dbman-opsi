@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any
 
 from dbman_opsi.oci_cli import OciCli
+from dbman_opsi.redact import redact_text
 from dbman_opsi.status import data_safe_status, dbm_status, opsi_insight_status, opsi_status
 
 
@@ -182,7 +183,10 @@ class FleetDiscoveryResult:
 
     def require_complete(self) -> "FleetDiscoveryResult":
         if not self.complete:
-            details = "; ".join(f"{finding.scope}: {finding.message}" for finding in self.findings)
+            details = "; ".join(
+                f"{redact_text(finding.scope)}: {redact_text(finding.message)}"
+                for finding in self.findings
+            )
             raise DiscoveryScopeError(f"fleet discovery is incomplete: {details}")
         return self
 

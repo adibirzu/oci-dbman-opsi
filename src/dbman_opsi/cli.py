@@ -68,7 +68,7 @@ from dbman_opsi.evidence import evidence_json, evidence_markdown
 from dbman_opsi.fleet import CredentialPolicy, DeploymentMode, DiscoveryScope, FleetPlan, RunManifest, TargetPlan, public_plan_summary
 from dbman_opsi.fleet_answers import FleetAnswers, fleet_questionnaire, load_answers, require_valid_answers
 from dbman_opsi.fleet_dependencies import target_plans_from_discovery
-from dbman_opsi.fleet_discovery import FleetDiscovery
+from dbman_opsi.fleet_discovery import DiscoveryScopeError, FleetDiscovery
 from dbman_opsi.fleet_executor import FleetOnboardingExecutor, PhaseOutcome
 from dbman_opsi.fleet_offboarding import CleanupExecutor, CleanupHandoffEvidenceImporter, CleanupHandoffPacketWriter, CleanupPlanner, OciCleanupOperations, public_cleanup_summary
 from dbman_opsi.fleet_state import DEFAULT_FLEET_STATE_PATH, FleetStateStore, LeaseHeartbeat, RunLeaseError
@@ -1671,6 +1671,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"Unhandled command {args.command}")
     try:
         return handler(args, ctx)
+    except DiscoveryScopeError as exc:
+        if args.command not in {"onboard", "resume"}:
+            raise
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 3
     except (ValueError, ConfigError) as exc:
         if args.command not in {"onboard", "resume", "import-handoff", "import-cleanup-handoff", "import-collection-evidence", "fleet-status", "offboard"}:
             raise
