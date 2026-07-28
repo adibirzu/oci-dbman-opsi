@@ -1,6 +1,6 @@
 # Continuous Integration
 
-This document describes the three CI jobs that run on every push and pull request,
+This document describes the five CI jobs that run on every push and pull request,
 how to reproduce each check locally, and how to interpret and triage findings.
 
 ## Jobs
@@ -27,7 +27,37 @@ pytest -m eval --no-cov         # run only the eval marker suite
 
 ---
 
-### 2. `security` — Bandit static analysis
+### 2. `terraform` — validation and contract tests
+
+Runs Terraform 1.5.0 initialization and validation for every supported
+Terraform root, then runs `tests/test_terraform.py`. This checks the public
+module contracts without applying OCI infrastructure.
+
+**Run locally:**
+
+```bash
+terraform -chdir=terraform/examples/zero-start-poc init -backend=false
+terraform -chdir=terraform/examples/zero-start-poc validate
+python -m pytest -q --no-cov tests/test_terraform.py
+```
+
+---
+
+### 3. `deps` — dependency vulnerability scan
+
+Installs the package and runs `pip-audit .` to identify known dependency
+vulnerabilities.
+
+**Run locally:**
+
+```bash
+python -m pip install pip-audit
+pip-audit .
+```
+
+---
+
+### 4. `security` — Bandit static analysis
 
 Runs `bandit -r src/ -ll --skip B608` against the entire `src/` tree.
 
@@ -55,7 +85,7 @@ bandit -r src/ -lll              # high-severity only (strict mode)
 
 ---
 
-### 3. `secret-scan` — Gitleaks
+### 5. `secret-scan` — Gitleaks
 
 Runs `gitleaks/gitleaks-action@v2` with a custom `.gitleaks.toml` config.
 
@@ -143,11 +173,20 @@ genuinely impossible to mistake for a real secret.
 pip install -e '.[dev]'
 pytest
 
-# 2. Security scan
+# 2. Terraform contract checks
+terraform -chdir=terraform/examples/zero-start-poc init -backend=false
+terraform -chdir=terraform/examples/zero-start-poc validate
+pytest -q --no-cov tests/test_terraform.py
+
+# 3. Dependency scan
+pip install pip-audit
+pip-audit .
+
+# 4. Security scan
 pip install bandit
 bandit -r src/ -ll --skip B608
 
-# 3. Secret scan
+# 5. Secret scan
 brew install gitleaks          # or: https://github.com/gitleaks/gitleaks/releases
 gitleaks detect --config .gitleaks.toml --verbose
 ```
