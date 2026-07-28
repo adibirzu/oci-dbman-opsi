@@ -13,6 +13,7 @@ from dbman_opsi.fleet import CredentialPolicy, DeploymentMode, FleetPlan, Resour
 from dbman_opsi.fleet_auth import AuthMode, OciAuth
 from dbman_opsi.fleet_portable_state import ObjectStorageStateBackend, RemoteLeaseHeartbeat, StateConflictError, StateIntegrityError
 from dbman_opsi.fleet_state import FleetStateStore
+from dbman_opsi.fleet_handoff import HandoffPacketWriter
 from dbman_opsi.fleet_operations import LifecycleOperations, collection_verdict
 from dbman_opsi.fleet_discovery import DiscoveryScopeError
 from dbman_opsi.credentials import CredentialDecision
@@ -29,6 +30,19 @@ def test_lifecycle_parser_keeps_existing_and_adds_exact_approval_boundary() -> N
     assert parser.parse_args(["doctor"]).command == "doctor"
     parsed = parser.parse_args(["onboard", "--region", "eu-frankfurt-1", "--plan-only", "--instance-principal"])
     assert parsed.instance_principal and parsed.plan_only
+    resumed = parser.parse_args(
+        [
+            "resume",
+            "--region",
+            "eu-frankfurt-1",
+            "--run-id",
+            "run",
+            "--approval",
+            "plan",
+            "--retry-failed",
+        ]
+    )
+    assert resumed.retry_failed
 
 
 def test_canonical_credential_policy_materializes_adapter_visible_users() -> None:
@@ -256,6 +270,44 @@ def test_lifecycle_decisions_and_validation_require_collection_proof(monkeypatch
     assert operations.validation(target).readiness is ReadinessVerdict.COLLECTING
     monkeypatch.setattr("dbman_opsi.fleet_operations.ValidationService.validate", lambda *_: ["db: Log Analytics query result count=5"])
     assert operations.validation(log_target).readiness is ReadinessVerdict.READY
+
+
+def test_lifecycle_missing_binding_handoff_is_redacted_and_autonomous_skips_credentials(
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    operations = LifecycleOperations(plan, object())
+    cloud = TargetPlan(
+        "db",
+        "db",
+        "dbcs",
+        "eu-frankfurt-1",
+        resource_id="db-id",
+        services=("dbm",),
+    )
+    handoff = operations.vault_endpoints(cloud)
+    assert handoff.handoff_requested
+    assert "credential reference" in (handoff.message or "")
+    assert "secret" not in (handoff.message or "").lower()
+    HandoffPacketWriter(tmp_path, signing_key=b"test-key").write(
+        run_id="run",
+        plan_id=plan.plan_id,
+        target_id=cloud.target_id,
+        phase="vault-endpoints",
+        instructions=handoff.message or "",
+    )
+
+    autonomous = TargetPlan(
+        "adb",
+        "adb",
+        "autonomous",
+        "eu-frankfurt-1",
+        resource_id="adb-id",
+        services=("dbm",),
+    )
+    outcome = operations.preferred_credentials(autonomous)
+    assert not outcome.handoff_requested
+    assert "service-managed" in (outcome.message or "")
 
 
 def test_collection_readiness_is_conjunctive_per_requested_service() -> None:

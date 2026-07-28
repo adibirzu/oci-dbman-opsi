@@ -472,6 +472,74 @@ class RunManifest:
         checkpoint = target.checkpoint(phase) or PhaseCheckpoint(phase=phase)
         return self.with_target(target.with_checkpoint(checkpoint.transition(state, **references)))
 
+    def reopen_failed(self) -> "RunManifest":
+        """Reopen explicit failures without weakening authorization boundaries.
+
+        This operation is used only by an exact-plan-approved retry. Completed
+        phases and their ownership records are preserved. Authorization blocks
+        remain terminal; dependency blocks are reopened after their failed
+        parent is made retryable.
+        """
+
+        reopened = self
+        failed_target_ids = {
+            target.target_id
+            for target in self.targets
+            if target.state is TargetState.FAILED
+            and any(checkpoint.state is PhaseState.FAILED for checkpoint in target.checkpoints)
+        }
+        for target in self.targets:
+            checkpoints = tuple(
+                PhaseCheckpoint(
+                    phase=checkpoint.phase,
+                    state=PhaseState.RETRYABLE,
+                    attempts=checkpoint.attempts,
+                    handoff_ref=checkpoint.handoff_ref,
+                    work_request_ref=checkpoint.work_request_ref,
+                    message="explicit exact-plan retry requested",
+                )
+                if checkpoint.state is PhaseState.FAILED
+                else checkpoint
+                for checkpoint in target.checkpoints
+            )
+            dependency_blocked = any(
+                checkpoint.state is PhaseState.BLOCKED
+                and str(checkpoint.message or "").startswith("dependency failed:")
+                and any(
+                    failed_target_id in str(checkpoint.message or "")
+                    for failed_target_id in failed_target_ids
+                )
+                for checkpoint in target.checkpoints
+            )
+            if dependency_blocked:
+                checkpoints = tuple(
+                    PhaseCheckpoint(
+                        phase=checkpoint.phase,
+                        state=PhaseState.RETRYABLE,
+                        attempts=checkpoint.attempts,
+                        handoff_ref=checkpoint.handoff_ref,
+                        work_request_ref=checkpoint.work_request_ref,
+                        message="dependency reopened by exact-plan retry",
+                    )
+                    if checkpoint.state is PhaseState.BLOCKED
+                    and str(checkpoint.message or "").startswith("dependency failed:")
+                    else checkpoint
+                    for checkpoint in checkpoints
+                )
+            if target.target_id in failed_target_ids or dependency_blocked:
+                reopened = reopened.with_target(
+                    TargetManifest(
+                        target_id=target.target_id,
+                        state=TargetState.PENDING,
+                        readiness=ReadinessVerdict.DEGRADED,
+                        local_proof=target.local_proof,
+                        live_oci_proof=target.live_oci_proof,
+                        checkpoints=checkpoints,
+                        resources=target.resources,
+                    )
+                )
+        return reopened
+
     @property
     def resumable(self) -> bool:
         return any(target.resumable for target in self.targets)

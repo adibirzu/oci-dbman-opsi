@@ -174,16 +174,16 @@ class EnablementService:
     def _enable_autonomous(self, target: Target, *, enable_opsi: bool = True) -> bool:
         if not target.resource_id:
             raise ValueError(f"Target {target.name} is missing resource_id")
-        self.oci.run([
+        applied = self.oci.run_tolerating([
             "db",
             "autonomous-database",
             "enable-autonomous-database-management",
             "--autonomous-database-id",
             target.resource_id,
-        ])
+        ], tolerated=self.DBM_ALREADY_ENABLED_MARKERS)
         if enable_opsi and target.opsi_database_insight_id:
             self.enable_opsi(target)
-        return True
+        return applied
 
     # Markers returned by the Database service when Database Management is
     # already on (or its enable request is already in flight). Treated as an
