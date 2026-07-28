@@ -1,0 +1,240 @@
+title: OCI Database Fleet Observability Prerequisites
+description: Deploy ownership-tagged OCI prerequisites for Database Management, Operations Insights, Data Safe, and Log Analytics fleet onboarding. Database credentials, database users, target selection, service enablement, and collection validation remain in the dbman-opsi CLI lifecycle.
+stackDescription: Creates or reuses reviewed networking and Vault resources, then creates only the selected service private endpoints. Production mode forbids disposable network creation. No database password is accepted by this stack.
+schemaVersion: 1.1.0
+version: "20260728"
+locale: en
+source:
+  type: quickstart
+  reference: dbman-opsi
+allowViewState: false
+informationalText: Review the Terraform plan before apply. Use a unique lifecycle ID. Resource Manager state can contain tenancy topology, so keep state access restricted.
+instructions: After apply, import the stack outputs into a private dbman-opsi configuration and run the fleet onboarding plan. Registration is not collection proof.
+troubleshooting: If plan fails, verify Resource Manager IAM, regional service availability, VCN/subnet selection, Vault ownership, and that Data Safe is already enabled before requesting a Data Safe private endpoint.
+
+variableGroups:
+  - title: Required OCI Scope
+    variables:
+      - tenancy_ocid
+      - compartment_ocid
+      - region
+  - title: Lifecycle and Services
+    variables:
+      - deployment_mode
+      - demo_lifecycle_id
+      - evidence_retention_days
+      - demo_services
+  - title: Network
+    variables:
+      - create_test_network
+      - vcn_ocid
+      - subnet_ocid
+      - test_vcn_cidr
+      - test_subnet_cidr
+  - title: Vault and Key
+    variables:
+      - create_vault
+      - vault_ocid
+      - key_ocid
+  - title: Existing or Optional Service Endpoints
+    variables:
+      - dbm_private_endpoint_id
+      - opsi_private_endpoint_id
+      - data_safe_private_endpoint_id
+      - create_data_safe_private_endpoint
+
+variables:
+  tenancy_ocid:
+    title: Tenancy OCID
+    type: string
+    required: true
+    visible: false
+
+  compartment_ocid:
+    title: Target Compartment
+    description: Compartment in which lifecycle-owned prerequisite resources are created.
+    type: oci:identity:compartment:id
+    required: true
+
+  region:
+    title: Region
+    type: oci:identity:region:name
+    required: true
+
+  deployment_mode:
+    title: Deployment Mode
+    description: PoC and Demo may create disposable networking. Production requires an existing VCN and subnet.
+    type: enum
+    enum:
+      - poc
+      - demo
+      - production
+    default: poc
+    required: true
+
+  demo_lifecycle_id:
+    title: Unique Lifecycle ID
+    type: string
+    required: true
+    minLength: 8
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{7,63}$"
+    description: Unique ownership identifier for this stack. Offboarding uses it to distinguish created resources from reused resources.
+
+  evidence_retention_days:
+    title: Sanitized Evidence Retention Days
+    type: integer
+    default: 7
+    required: true
+    minimum: 7
+    maximum: 7
+    description: Sanitized evidence is retained for seven days. Credentials and topology must not be placed in retained evidence.
+
+  demo_services:
+    title: Service Prerequisites
+    type: array
+    items:
+      type: enum
+      enum:
+        - dbm
+        - opsi
+        - datasafe
+        - logan
+    default:
+      - dbm
+      - opsi
+      - datasafe
+      - logan
+    required: true
+    description: DBM and OPSI select their private endpoints. Data Safe endpoint creation is separately opt-in. Log Analytics agents, entities, sources, and associations are completed by the CLI.
+
+  create_test_network:
+    title: Create Lifecycle-Owned Network
+    type: boolean
+    default: true
+    description: Creates a private VCN, subnet, service gateway, route table, and security list for PoC/Demo. Must be false in Production.
+
+  vcn_ocid:
+    title: Existing VCN
+    type: oci:core:vcn:id
+    required: false
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+    visible:
+      not:
+        - ${create_test_network}
+
+  subnet_ocid:
+    title: Existing Private Subnet
+    type: oci:core:subnet:id
+    required: false
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+      vcnId: ${vcn_ocid}
+    visible:
+      not:
+        - ${create_test_network}
+
+  test_vcn_cidr:
+    title: Lifecycle-Owned VCN CIDR
+    type: string
+    required: false
+    description: Enter an owner-approved RFC1918 CIDR that does not overlap existing networks.
+    visible: ${create_test_network}
+
+  test_subnet_cidr:
+    title: Lifecycle-Owned Private Subnet CIDR
+    type: string
+    required: false
+    description: Enter a private subnet CIDR contained within the lifecycle-owned VCN CIDR.
+    visible: ${create_test_network}
+
+  create_vault:
+    title: Create Lifecycle-Owned Vault and Key
+    type: boolean
+    default: true
+    description: Creates an OCI Vault and AES key. Database passwords are never Terraform inputs.
+
+  vault_ocid:
+    title: Existing Vault
+    type: oci:kms:vault:id
+    required: false
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+    visible:
+      not:
+        - ${create_vault}
+
+  key_ocid:
+    title: Existing Vault Key
+    type: oci:kms:key:id
+    required: false
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+      vaultId: ${vault_ocid}
+    visible:
+      not:
+        - ${create_vault}
+
+  dbm_private_endpoint_id:
+    title: Existing Database Management Private Endpoint OCID
+    type: string
+    required: false
+    description: Leave empty to create a lifecycle-owned endpoint when DBM or OPSI is selected.
+
+  opsi_private_endpoint_id:
+    title: Existing Operations Insights Private Endpoint OCID
+    type: string
+    required: false
+    description: Leave empty to create a lifecycle-owned endpoint when OPSI is selected.
+
+  data_safe_private_endpoint_id:
+    title: Existing Data Safe Private Endpoint OCID
+    type: string
+    required: false
+    description: Reused endpoints remain outside this stack's ownership.
+
+  create_data_safe_private_endpoint:
+    title: Create Data Safe Private Endpoint
+    type: boolean
+    default: false
+    description: Data Safe must already be enabled in the selected region. The endpoint is created only when Data Safe is selected and no existing endpoint is supplied.
+
+outputGroups:
+  - title: Private Prerequisite References
+    outputs:
+      - vcn_ocid
+      - subnet_ocid
+      - db_management_private_endpoint_ocid
+      - opsi_private_endpoint_ocid
+      - data_safe_private_endpoint_ocid
+      - vault_ocid
+      - key_ocid
+  - title: Ownership Receipt
+    outputs:
+      - disposable_lifecycle
+
+outputs:
+  vcn_ocid:
+    type: copyableString
+    title: VCN OCID
+  subnet_ocid:
+    type: copyableString
+    title: Subnet OCID
+  db_management_private_endpoint_ocid:
+    type: copyableString
+    title: Database Management Private Endpoint OCID
+  opsi_private_endpoint_ocid:
+    type: copyableString
+    title: Operations Insights Private Endpoint OCID
+  data_safe_private_endpoint_ocid:
+    type: copyableString
+    title: Data Safe Private Endpoint OCID
+  vault_ocid:
+    type: copyableString
+    title: Vault OCID
+  key_ocid:
+    type: copyableString
+    title: Vault Key OCID
+  disposable_lifecycle:
+    type: json
+    title: Ownership and Lifecycle Receipt

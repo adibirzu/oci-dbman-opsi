@@ -1,0 +1,11 @@
+./.terraform.lock.hcl
+./PACKAGE-MANIFEST.txt
+./README.md
+./main.tf
+./modules/dbm-opsi-enablement/main.tf
+./modules/dbm-opsi-enablement/outputs.tf
+./modules/dbm-opsi-enablement/variables.tf
+./modules/dbm-opsi-enablement/versions.tf
+./schema.yaml
+./variables.tf
+./versions.tf
