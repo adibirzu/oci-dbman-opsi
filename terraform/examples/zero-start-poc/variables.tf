@@ -13,10 +13,26 @@ variable "region" {
   description = "OCI region."
 }
 
+variable "deployment_mode" {
+  type        = string
+  description = "Lifecycle policy mode for this stack: poc, demo, or production."
+  default     = "poc"
+
+  validation {
+    condition     = contains(["poc", "demo", "production"], var.deployment_mode)
+    error_message = "deployment_mode must be poc, demo, or production."
+  }
+}
+
 variable "demo_lifecycle_id" {
   type        = string
   description = "Required project-owned lifecycle tag value used to discover and destroy only disposable demo resources."
   default     = "dbman-opsi-disposable"
+
+  validation {
+    condition     = length(trimspace(var.demo_lifecycle_id)) >= 8
+    error_message = "demo_lifecycle_id must be a unique, non-empty ownership identifier of at least eight characters."
+  }
 }
 
 variable "evidence_retention_days" {
@@ -43,8 +59,8 @@ variable "demo_services" {
 
 variable "create_test_network" {
   type        = bool
-  description = "Create a PoC VCN/subnet."
-  default     = false
+  description = "Create a lifecycle-owned PoC/demo VCN and private subnet. Forbidden in production mode."
+  default     = true
 }
 
 variable "vcn_ocid" {
@@ -63,18 +79,28 @@ variable "test_vcn_cidr" {
   type        = string
   description = "PoC VCN CIDR."
   default     = null
+
+  validation {
+    condition     = var.test_vcn_cidr == null || can(cidrnetmask(var.test_vcn_cidr))
+    error_message = "test_vcn_cidr must be a valid IPv4 CIDR."
+  }
 }
 
 variable "test_subnet_cidr" {
   type        = string
   description = "PoC private subnet CIDR."
   default     = null
+
+  validation {
+    condition     = var.test_subnet_cidr == null || can(cidrnetmask(var.test_subnet_cidr))
+    error_message = "test_subnet_cidr must be a valid IPv4 CIDR."
+  }
 }
 
 variable "create_vault" {
   type        = bool
   description = "Create a PoC vault/key."
-  default     = false
+  default     = true
 }
 
 variable "vault_ocid" {
@@ -92,22 +118,25 @@ variable "key_ocid" {
 variable "policy_name" {
   type        = string
   description = "IAM policy name."
+  default     = "dbman-opsi-enable-policy"
 }
 
 variable "policy_description" {
   type        = string
   description = "IAM policy description."
+  default     = "Database observability enablement policy managed by dbman-opsi."
 }
 
 variable "policy_statements" {
   type        = list(string)
   description = "IAM policy statements."
+  default     = []
 }
 
 variable "create_identity_policy" {
   type        = bool
-  description = "Create the IAM policy for DBM/OPSI enablement. Set false when an existing operator/group policy is managed outside this stack."
-  default     = true
+  description = "Create an explicitly supplied IAM policy. Resource Manager defaults this off so reviewed IAM remains owner-managed."
+  default     = false
 }
 
 variable "targets" {
@@ -214,7 +243,25 @@ variable "dbsnmp_secret_id" {
 
 variable "opsi_private_endpoint_id" {
   type        = string
-  description = "OPSI private endpoint OCID. When null, only DBM (not Ops Insights) is enabled."
+  description = "Existing OPSI private endpoint OCID. When null and OPSI is selected, this stack creates a lifecycle-owned endpoint."
+  default     = null
+}
+
+variable "dbm_private_endpoint_id" {
+  type        = string
+  description = "Existing Database Management private endpoint OCID. When null and DBM or OPSI is selected, this stack creates one."
+  default     = null
+}
+
+variable "create_data_safe_private_endpoint" {
+  type        = bool
+  description = "Create a lifecycle-owned Data Safe private endpoint. Data Safe must already be enabled in the region."
+  default     = false
+}
+
+variable "data_safe_private_endpoint_id" {
+  type        = string
+  description = "Existing Data Safe private endpoint OCID. Reused resources are never owned or deleted by this stack."
   default     = null
 }
 
@@ -256,9 +303,10 @@ variable "dbcs_data_storage_gb" {
 }
 
 variable "config_file_profile" {
-  description = "OCI CLI config profile (~/.oci/config) the provider authenticates with."
+  description = "Optional local OCI CLI profile. Leave null in OCI Resource Manager so its managed authentication is used."
   type        = string
-  default     = "DEFAULT"
+  default     = null
+  nullable    = true
 }
 
 variable "availability_domain_index" {
