@@ -13,7 +13,9 @@ def test_readme_has_resource_manager_button_and_workshop_entrypoint() -> None:
 
     assert "cloud.oracle.com/resourcemanager/stacks/create" in readme
     assert "Deploy to Oracle Cloud" in readme
-    assert "github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/main.zip" in readme
+    assert "github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/resource-manager-stack.zip" in readme
+    assert "archive/refs/heads/main.zip" not in readme
+    assert "docs/resource-manager.md" in readme
     assert "docs/workshop/README.md" in readme
     assert "docs/blog-opsi-poc-update.md" in readme
     assert "Cloud Shell" in readme
@@ -39,12 +41,13 @@ def test_workshop_docs_cover_end_to_end_paths_without_tenant_names() -> None:
 def test_resource_manager_schema_exists_for_public_stack() -> None:
     schema = read("terraform/examples/zero-start-poc/schema.yaml")
 
-    assert "title: OCI Database Observability and Security Enablement" in schema
+    assert "title: OCI Database Fleet Observability Prerequisites" in schema
     assert "tenancy_ocid" in schema
     assert "compartment_ocid" in schema
-    assert "enable_log_analytics" in schema
-    assert "log_analytics_log_group_name" in schema
-    assert "password" not in schema.lower()
+    assert "deployment_mode" in schema
+    assert "resource-manager-stack" not in schema
+    assert "type: password" not in schema.lower()
+    assert "allowViewState: false" in schema
 
 
 def test_public_surface_does_not_contain_raw_sensitive_values() -> None:
@@ -57,6 +60,7 @@ def test_public_surface_does_not_contain_raw_sensitive_values() -> None:
         "README.md",
         "docs/blog-opsi-poc-update.md",
         "docs/workshop/README.md",
+        "docs/resource-manager.md",
         "docs/security.md",
         "terraform/examples/zero-start-poc/main.tf",
         "terraform/examples/zero-start-poc/variables.tf",
@@ -70,6 +74,20 @@ def test_public_surface_does_not_contain_raw_sensitive_values() -> None:
     assert tenant_phrase not in combined.lower()
     for prefix in public_ip_prefixes:
         assert prefix not in combined
+
+
+def test_resource_manager_publication_workflow_is_fail_closed() -> None:
+    workflow = read(".github/workflows/resource-manager-stack.yml")
+    build_script = read("scripts/build-resource-manager-stack.sh")
+
+    assert "terraform_version: \"1.5.0\"" in workflow
+    assert "terraform -chdir=\"${RUNNER_TEMP}/resource-manager-stack\" validate" in workflow
+    assert "needs: validate-package" in workflow
+    assert "git push --force origin resource-manager-stack" in workflow
+    assert "contents: write" in workflow
+    assert "*.tfstate" in build_script
+    assert ".terraform" in build_script
+    assert "terraform.tfvars" in build_script
 
 
 def test_gitignore_excludes_public_repo_local_artifacts() -> None:

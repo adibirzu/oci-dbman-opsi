@@ -27,11 +27,14 @@ def render_tfvars(config: EnablementConfig) -> dict[str, object]:
         }
         for target in config.targets
     ]
+    selected_services = sorted({service for target in config.targets for service in target.services})
     logan_enabled = any(target.wants("logan") for target in config.targets)
     return {
         "tenancy_ocid": config.tenancy_id,
         "compartment_ocid": config.compartment_id,
         "region": config.region,
+        "deployment_mode": "poc",
+        "demo_services": selected_services or ["dbm", "opsi"],
         "config_file_profile": config.profile,
         "create_test_network": config.network.create_test_network,
         "vcn_ocid": config.network.vcn_id,

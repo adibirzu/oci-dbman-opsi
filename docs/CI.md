@@ -1,7 +1,8 @@
 # Continuous Integration
 
-This document describes the five CI jobs that run on every push and pull request,
-how to reproduce each check locally, and how to interpret and triage findings.
+This document describes the five core CI jobs plus the Resource Manager package
+workflow, how to reproduce each check locally, and how to interpret and triage
+findings.
 
 ## Jobs
 
@@ -166,6 +167,35 @@ genuinely impossible to mistake for a real secret.
 
 ---
 
+### 6. `resource-manager-stack` — deploy package validation and publication
+
+Pull requests that change the Resource Manager source, schema, module, build
+script, or guide run `.github/workflows/resource-manager-stack.yml`. The job:
+
+1. assembles a self-contained package with Terraform and `schema.yaml` at root;
+2. rejects Terraform state, `.terraform`, and tfvars files;
+3. validates the schema contract;
+4. checks formatting and validates with Terraform 1.5.0;
+5. uploads the clean ZIP for seven days.
+
+After the same job succeeds on `main`, a second job publishes the clean files to
+the generated `resource-manager-stack` branch used by the Deploy to Oracle Cloud
+button. Core CI ignores that generated branch so publication does not start a
+recursive workflow.
+
+**Run locally:**
+
+```bash
+package_dir="$(mktemp -d)/resource-manager-stack"
+scripts/build-resource-manager-stack.sh "${package_dir}"
+python scripts/validate_resource_manager_schema.py "${package_dir}"
+terraform -chdir="${package_dir}" fmt -check -recursive
+terraform -chdir="${package_dir}" init -backend=false -input=false
+terraform -chdir="${package_dir}" validate
+```
+
+---
+
 ## Quick-reference — run all CI checks locally
 
 ```bash
@@ -189,4 +219,11 @@ bandit -r src/ -ll --skip B608
 # 5. Secret scan
 brew install gitleaks          # or: https://github.com/gitleaks/gitleaks/releases
 gitleaks detect --config .gitleaks.toml --verbose
+
+# 6. Resource Manager package
+package_dir="$(mktemp -d)/resource-manager-stack"
+scripts/build-resource-manager-stack.sh "${package_dir}"
+python scripts/validate_resource_manager_schema.py "${package_dir}"
+terraform -chdir="${package_dir}" init -backend=false -input=false
+terraform -chdir="${package_dir}" validate
 ```
