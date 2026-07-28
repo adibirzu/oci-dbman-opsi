@@ -473,6 +473,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume = lifecycle("resume", "Resume a checkpointed fleet onboarding run")
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--approval", required=True)
+    resume.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry failed phases and dependency-blocked children for this exact approved plan",
+    )
     resume.add_argument("--handoff-key", help="Private 0600 HMAC signing-key file")
     resume.add_argument("--handoff-dir", default="generated/fleet-handoffs", help="Private packet directory")
     import_handoff = lifecycle("import-handoff", "Import signed onboarding handoff completion evidence")
@@ -956,7 +961,11 @@ def _cmd_resume(args: argparse.Namespace, ctx: _CliContext) -> int:
             lambda region: _FencedOci(_lifecycle_oci(args, ctx, dry_run=False, region=region), remote_fence),
             collection_proofs=imported_proofs,
         ).handlers()
-        resumed = FleetOnboardingExecutor(plan, store, phase_handlers=handlers, handoff_writer=_handoff_writer(args.handoff_key, args.handoff_dir)).execute(approved_plan_id=args.approval, run_id=args.run_id)
+        resumed = FleetOnboardingExecutor(plan, store, phase_handlers=handlers, handoff_writer=_handoff_writer(args.handoff_key, args.handoff_dir)).execute(
+            approved_plan_id=args.approval,
+            run_id=args.run_id,
+            retry_failed=args.retry_failed,
+        )
         _assert_remote_fence(remote_fence)
         _portable_push(args, ctx, resumed)
         _assert_remote_fence(remote_fence)

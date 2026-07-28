@@ -73,7 +73,21 @@ class LifecycleOperations:
     @staticmethod
     def _needs(target: Target, *fields: str) -> PhaseOutcome | None:
         missing = [field for field in fields if not getattr(target, field, None)]
-        return PhaseOutcome.handoff("operator input required: " + ", ".join(missing)) if missing else None
+        public_labels = {
+            "management_agent_id": "management agent reference",
+            "opsi_private_endpoint_id": "OPSI endpoint reference",
+            "password_secret_id": "credential reference",
+            "private_endpoint_id": "DBM endpoint reference",
+            "resource_id": "database resource reference",
+        }
+        return (
+            PhaseOutcome.handoff(
+                "operator input required: "
+                + ", ".join(public_labels.get(field, "approved resource reference") for field in missing)
+            )
+            if missing
+            else None
+        )
 
     def prerequisite(self, plan: TargetPlan) -> PhaseOutcome:
         if plan.settings.get("authority_mode") == "plan-only":
@@ -125,6 +139,10 @@ class LifecycleOperations:
         target, config = self._target(plan), self._config(plan)
         if "dbm" not in target.services:
             return PhaseOutcome()
+        if target.kind == "autonomous":
+            return PhaseOutcome(
+                message="skipped: Autonomous Database uses service-managed DBM credentials"
+            )
         required = self._needs(target, "password_secret_id", "resource_id")
         if required:
             return required
