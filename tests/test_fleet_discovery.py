@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from dbman_opsi.fleet_discovery import DiscoveryScopeError, FleetDiscovery
+from dbman_opsi.fleet_discovery import (
+    DiscoveryFinding,
+    DiscoveryScopeError,
+    FleetDiscovery,
+    FleetDiscoveryResult,
+)
 from dbman_opsi.oci_cli import OciCli
 from dbman_opsi.runner import CommandResult
 
@@ -138,6 +143,29 @@ def test_failed_scope_enumeration_is_explicit_and_cannot_emit_a_complete_target_
     assert result.findings[0].scope == "regions"
     with pytest.raises(DiscoveryScopeError, match="incomplete"):
         discovery.discover()
+
+
+def test_incomplete_discovery_error_redacts_scope_identifiers() -> None:
+    raw_compartment = "ocid1.compartment.oc1..private-scope"
+    result = FleetDiscoveryResult(
+        "tenancy",
+        ("eu-frankfurt-1",),
+        ((raw_compartment, "private"),),
+        (),
+        (
+            DiscoveryFinding(
+                f"eu-frankfurt-1/{raw_compartment}/list_cloud_vm_clusters",
+                f"not authorized for {raw_compartment}",
+            ),
+        ),
+    )
+
+    with pytest.raises(DiscoveryScopeError) as raised:
+        result.require_complete()
+
+    message = str(raised.value)
+    assert raw_compartment not in message
+    assert "<OCI_OCID>" in message
 
 
 def test_default_region_facade_uses_each_subscribed_region() -> None:
