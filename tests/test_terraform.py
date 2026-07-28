@@ -23,6 +23,8 @@ def test_render_tfvars_includes_network_policy_and_targets() -> None:
 
     assert tfvars["create_test_network"] is True
     assert tfvars["config_file_profile"] == "DEFAULT"
+    assert tfvars["deployment_mode"] == "poc"
+    assert tfvars["demo_services"] == ["dbm", "opsi"]
     assert tfvars["targets"] == [
         {
             "kind": "dbcs",
@@ -52,6 +54,7 @@ def test_render_tfvars_enables_log_analytics_only_when_selected() -> None:
     tfvars = render_tfvars(config)
 
     assert tfvars["enable_log_analytics"] is True
+    assert tfvars["demo_services"] == ["dbm", "logan", "opsi"]
     assert "manage loganalytics-resources-family" in " ".join(tfvars["policy_statements"])  # type: ignore[arg-type]
 
 
@@ -87,6 +90,54 @@ def test_disposable_stack_uses_lifecycle_tags_and_never_exports_passwords() -> N
     assert 'output "disposable_lifecycle"' in terraform
     assert 'output "db_admin_password"' not in terraform
     assert 'output "adb_admin_password"' not in terraform
+
+
+def test_resource_manager_stack_is_mode_aware_and_prerequisite_only() -> None:
+    root = Path(__file__).parents[1] / "terraform" / "examples" / "zero-start-poc"
+    terraform = root.joinpath("main.tf").read_text(encoding="utf-8")
+    variables = root.joinpath("variables.tf").read_text(encoding="utf-8")
+    schema = root.joinpath("schema.yaml").read_text(encoding="utf-8")
+
+    assert 'variable "deployment_mode"' in variables
+    assert 'contains(["poc", "demo", "production"], var.deployment_mode)' in variables
+    assert 'var.deployment_mode != "production" || !var.create_test_network' in terraform
+    assert 'resource "oci_opsi_operations_insights_private_endpoint" "opsi"' in terraform
+    assert 'resource "oci_data_safe_data_safe_private_endpoint" "datasafe"' in terraform
+    assert 'variable "create_data_safe_private_endpoint"' in variables
+    assert "allowViewState: false" in schema
+    assert "oci:identity:compartment:id" in schema
+    assert "oci:identity:region:name" in schema
+    assert "oci_tenancy" not in schema
+    assert "oci_compartment" not in schema
+    assert "oci_region" not in schema
+
+
+def test_resource_manager_package_is_self_contained_and_state_free(tmp_path) -> None:
+    root = Path(__file__).parents[1]
+    package = tmp_path / "resource-manager-stack"
+    build = root / "scripts" / "build-resource-manager-stack.sh"
+
+    subprocess.run([str(build), str(package)], cwd=root, check=True, capture_output=True, text=True)
+
+    assert package.joinpath("main.tf").exists()
+    assert package.joinpath("variables.tf").exists()
+    assert package.joinpath("versions.tf").exists()
+    assert package.joinpath("schema.yaml").exists()
+    assert package.joinpath(".terraform.lock.hcl").exists()
+    assert package.joinpath("modules/dbm-opsi-enablement/main.tf").exists()
+    assert 'source = "./modules/dbm-opsi-enablement"' in package.joinpath("main.tf").read_text(encoding="utf-8")
+    assert "../../modules/dbm-opsi-enablement" not in package.joinpath("main.tf").read_text(encoding="utf-8")
+    assert not list(package.rglob("*.tfstate"))
+    assert not list(package.rglob(".terraform"))
+    assert not list(package.rglob("terraform.tfvars*"))
+
+    subprocess.run(
+        ["python3", str(root / "scripts" / "validate_resource_manager_schema.py"), str(package)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _terraform_graph(root: Path) -> str:

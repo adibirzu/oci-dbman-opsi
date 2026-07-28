@@ -1,6 +1,6 @@
 # OCI Database Fleet Observability Lifecycle
 
-[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/main.zip)
+[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/adibirzu/oci-dbman-opsi/archive/refs/heads/resource-manager-stack.zip)
 
 `dbman-opsi` discovers Oracle database fleets and coordinates their OCI
 observability and security lifecycle. An operator answers one questionnaire,
@@ -784,7 +784,27 @@ dbman-opsi validate --config dbman-opsi.customer.local.yaml
 
 ## Resource Manager
 
-The Deploy to Oracle Cloud button launches the Terraform stack under `terraform/examples/zero-start-poc`. Resource Manager provisions OCI-side prerequisites such as IAM, workshop networking, and service private endpoints. Database credentials and database-side scripts are handled by the CLI workflow so secrets are not placed in Terraform variables.
+The Deploy to Oracle Cloud button downloads a validated, self-contained package
+from the generated `resource-manager-stack` branch. The package places
+Terraform and `schema.yaml` at the archive root as OCI Resource Manager
+requires; it never sends the full source repository to Resource Manager.
+
+The stack creates or reuses ownership-tagged OCI-side prerequisites:
+
+- PoC/Demo networking, or an existing reviewed VCN/private subnet;
+- a Vault and key, or existing reviewed references;
+- Database Management and Operations Insights private endpoints according to
+  the selected services;
+- an optional Data Safe private endpoint when Data Safe is already enabled.
+
+Production mode rejects disposable network creation. IAM creation is disabled
+by default, no database password is accepted, and the package does not create
+databases, database users, Log Analytics agents, target registrations, or
+collection evidence. Those remain part of the immutable CLI onboarding plan.
+
+For variables, plan/apply guidance, output handoff, safe destroy ordering, and
+local package validation, see the
+[Resource Manager deployment guide](docs/resource-manager.md).
 
 ## Commands
 
