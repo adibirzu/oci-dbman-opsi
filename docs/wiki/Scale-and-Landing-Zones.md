@@ -5,7 +5,9 @@ one questionnaire, one immutable plan, one exact approval ID, and one private
 checkpoint store. Local acceptance coverage exercises 1, 100, and 1,000 target
 plans. **One thousand is an example, not a hard product limit.** It is
 orchestration coverage, not a universal OCI quota or live throughput guarantee;
-choose concurrency from 1–8 to respect OCI and owner capacity.
+choose concurrency from 1–8 to respect OCI and owner capacity. **> 1,000
+planned targets use the same plan, checkpoint, and resume model**, with capacity
+validated for the tenant.
 
 ## Select only what is approved
 
