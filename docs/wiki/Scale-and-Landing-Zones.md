@@ -3,9 +3,9 @@
 The same `dbman-opsi` lifecycle serves one selected database or a large fleet:
 one questionnaire, one immutable plan, one exact approval ID, and one private
 checkpoint store. Local acceptance coverage exercises 1, 100, and 1,000 target
-plans. That is orchestration coverage, not a universal OCI quota or live
-throughput guarantee; choose concurrency from 1–8 to respect OCI and owner
-capacity.
+plans. **One thousand is an example, not a hard product limit.** It is
+orchestration coverage, not a universal OCI quota or live throughput guarantee;
+choose concurrency from 1–8 to respect OCI and owner capacity.
 
 ## Select only what is approved
 
@@ -69,5 +69,5 @@ flowchart LR
 ```
 
 Pin an immutable reviewed Terraform release. The module leaves provider auth,
-state backend, target selection, Data Safe/Log Analytics, host/DBA work, and
-collection-proof acceptance to the calling root and this operations tool.
+state backend, target selection, host/DBA work, and collection-proof acceptance
+to the calling root and this operations tool.

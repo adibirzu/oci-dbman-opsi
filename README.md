@@ -37,6 +37,27 @@ ownership-safe offboarding. This is **not an official Oracle product** or an
 Oracle-supported deployment tool. Production use still requires owner-approved
 access and change control; complete release acceptance remains owner-gated.
 
+**New to fleet operations?** Start with the
+[Scale and Landing Zones Wiki guide](https://github.com/adibirzu/oci-dbman-opsi/wiki/Scale-and-Landing-Zones).
+It explains the workflow in plain language: **1,000 databases is a tested
+planning example, not a hard product limit**.
+
+## Scale in plain language
+
+Think of `dbman-opsi` as one checked, approved to-do list for your databases.
+Whether that list has one database or many, you select the scope, review the
+same plan, and approve it once. The tool then keeps a separate progress record
+for every database, so a problem with one target does not make it forget the
+work already completed for the others.
+
+It does **not** try to change every database at the same instant. You select a
+safe working pace (from 1 to 8 concurrent operations), which helps respect OCI
+limits and gives database owners time to complete any handoff tasks. The local
+acceptance suite includes a 1,000-target plan to demonstrate that the planning,
+ordering, status, resume, and cleanup model remains the same at large scale;
+actual capacity is governed by your OCI quotas, regions, selected services, and
+owner approvals.
+
 ## Why use it
 
 Enabling one OCI database is usually manageable. Enabling the same controls
