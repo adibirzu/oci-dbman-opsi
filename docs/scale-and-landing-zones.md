@@ -11,7 +11,9 @@ an acceptance-test example, not a hard product limit.**
 Local acceptance coverage exercises plans of **1, 100, and 1,000 targets**.
 That verifies deterministic discovery/selection, dependency ordering,
 checkpointing, resume, status, and zero-action cleanup planning at those sizes.
-It is not a claim of a universal OCI quota or live-tenancy throughput guarantee.
+Fleets with **more than 1,000 planned targets** use the same plan, checkpoint,
+and resume model, but their capacity must be validated for the tenant. This is
+not a claim of a universal OCI quota or live-tenancy throughput guarantee.
 Live throughput depends on approved OCI quotas, target/region distribution,
 service propagation, administrator handoffs, and the selected bounded
 concurrency (1–8).
@@ -20,7 +22,7 @@ concurrency (1–8).
 | --- | --- | --- |
 | 1 database | Private `--selection-file` with one target, or narrow filters | One plan, one run ID, the same production gates. |
 | 10–100 databases | Region/compartment/kind/tag filters plus exclusions | One reviewed plan and aggregate sanitized status. |
-| 1,000-target example plan, or a larger approved fleet | Broad approved filters, `all_discovered: true`, and an intentional concurrency value | The executor checkpoints each independent target; failures do not discard completed work. |
+| > 1,000 planned targets (the 1,000-target plan is the tested example) | Broad approved filters, `all_discovered: true`, and an intentional concurrency value | The executor checkpoints each independent target; failures do not discard completed work. |
 
 ## What the operator selects
 

@@ -40,7 +40,8 @@ access and change control; complete release acceptance remains owner-gated.
 **New to fleet operations?** Start with the
 [Scale and Landing Zones Wiki guide](https://github.com/adibirzu/oci-dbman-opsi/wiki/Scale-and-Landing-Zones).
 It explains the workflow in plain language: **1,000 databases is a tested
-planning example, not a hard product limit**.
+planning example, not a hard product limit; fleets can have more than 1,000
+planned targets**.
 
 ## Scale in plain language
 
@@ -54,9 +55,9 @@ It does **not** try to change every database at the same instant. You select a
 safe working pace (from 1 to 8 concurrent operations), which helps respect OCI
 limits and gives database owners time to complete any handoff tasks. The local
 acceptance suite includes a 1,000-target plan to demonstrate that the planning,
-ordering, status, resume, and cleanup model remains the same at large scale;
-actual capacity is governed by your OCI quotas, regions, selected services, and
-owner approvals.
+ordering, status, resume, and cleanup model remains the same at large scale.
+More than 1,000 planned targets use that same model, but actual capacity is
+governed by your OCI quotas, regions, selected services, and owner approvals.
 
 ## Why use it
 
@@ -454,8 +455,9 @@ reading the per-target verdict.
 - Public status uses opaque target handles. Topology, OCIDs, service references,
   and ownership records remain in ignored `0600` state.
 
-For the 1-to-1,000 target scale model, the exact operator selections, a visual
-workflow, and the Landing Zone Terraform integration boundary, see
+For the scale model—from one target to more than 1,000 planned targets—the exact
+operator selections, a visual workflow, and the Landing Zone Terraform
+integration boundary, see
 [Fleet Scale and Landing Zone Integration](docs/scale-and-landing-zones.md).
 
 ## Documentation map
@@ -471,7 +473,7 @@ workflow, and the Landing Zone Terraform integration boundary, see
 | Run the disposable incident demonstration | [End-to-end demo runbook](docs/demo-db-incident-e2e.md) |
 | Configure the Data Safe audit export bridge | [Data Safe to Log Analytics](docs/datasafe-log-analytics.md) |
 | Review security and publication controls | [Security guide](docs/security.md) |
-| Run one plan from 1 to 1,000 targets or enhance Landing Zone composition | [Fleet scale and Landing Zone integration](docs/scale-and-landing-zones.md) |
+| Run one plan at any scale, including more than 1,000 planned targets, or enhance Landing Zone composition | [Fleet scale and Landing Zone integration](docs/scale-and-landing-zones.md) |
 | See implementation and live release gates | [Product portfolio](docs/product/portfolio.md) |
 
 ## Architecture
