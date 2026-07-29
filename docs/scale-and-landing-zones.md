@@ -3,7 +3,8 @@
 `dbman-opsi` uses the same reviewed lifecycle for one selected database or a
 large fleet. The difference is selection scope, not a different execution
 model: answer one questionnaire, produce one immutable plan, review its exact
-ID, and execute/resume from one private state store.
+ID, and execute/resume from one private state store. **One thousand targets is
+an acceptance-test example, not a hard product limit.**
 
 ## Scale boundary
 
@@ -19,7 +20,7 @@ concurrency (1–8).
 | --- | --- | --- |
 | 1 database | Private `--selection-file` with one target, or narrow filters | One plan, one run ID, the same production gates. |
 | 10–100 databases | Region/compartment/kind/tag filters plus exclusions | One reviewed plan and aggregate sanitized status. |
-| Up to 1,000 planned targets | Broad approved filters, `all_discovered: true`, and an intentional concurrency value | The executor checkpoints each independent target; failures do not discard completed work. |
+| 1,000-target example plan, or a larger approved fleet | Broad approved filters, `all_discovered: true`, and an intentional concurrency value | The executor checkpoints each independent target; failures do not discard completed work. |
 
 ## What the operator selects
 
@@ -37,11 +38,11 @@ supply approved reference bindings.
 | `max_concurrency` | 1–8, chosen to respect OCI throttling and owner capacity. |
 | `--bindings` | Private Vault, endpoint, agent, and service references; never plaintext passwords. |
 
-## One workflow, from one DB to 1,000
+## One workflow, from one DB to a fleet
 
 ```mermaid
 flowchart LR
-    A["Choose scope and policy\n1 database or approved fleet"] --> B["Read-only discovery\nregions + compartments"]
+    A["Choose scope and policy\n1 database to an approved fleet"] --> B["Read-only discovery\nregions + compartments"]
     B --> C["Filter/select targets\nCDB parent retained for PDB"]
     C --> D["Immutable plan\nexact SHA-256 plan ID"]
     D --> E{"Human change approval"}
@@ -104,8 +105,7 @@ flowchart LR
 ```
 
 Pin an immutable reviewed Terraform release. The module does not own provider
-authentication, Terraform backend, target selection, Data Safe, Log Analytics,
-host/DBA handoffs, or collection-proof acceptance. Keep those decisions in the
-calling Landing Zone root and the `dbman-opsi` fleet plan. Autonomous Database
-and external-database lifecycle APIs are intentionally outside that Terraform
-module's scope.
+authentication, Terraform backend, target selection, host/DBA handoffs, or
+collection-proof acceptance. Keep those decisions in the calling Landing Zone
+root and the `dbman-opsi` fleet plan. Autonomous Database and external-database
+lifecycle APIs are intentionally outside that Terraform module's scope.
