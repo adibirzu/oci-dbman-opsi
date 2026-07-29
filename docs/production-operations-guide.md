@@ -142,6 +142,10 @@ YAML file containing `targets`/`target_ids`. Selection filters support regions,
 compartments, target kinds, lifecycle states, tags, names, service states,
 explicit IDs, and exclusions; exclusions always win.
 
+For the exact 1-to-1,000 target planning boundary, a visual workflow, and the
+Terraform Landing Zone integration split, see
+[Fleet Scale and Landing Zone Integration](scale-and-landing-zones.md).
+
 ## Production fleet workflow
 
 ### 1. Discover and review, with no writes
