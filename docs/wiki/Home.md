@@ -30,5 +30,7 @@ registration, or a `configured` result is not proof that collection is ready.
 | Collection readiness | Keeps configured, collecting, ready, degraded, blocked, and handed-off states separate. |
 | Safe cleanup | Removes only run-owned and run-enabled resources; production never deletes databases. |
 | Operations | Redacted journal, bounded DB incident bundles, Process Insights, and OPSI failure packets. |
+| Scale and Landing Zones | The same immutable-plan workflow is locally acceptance-covered at 1, 100, and 1,000 targets; a dedicated Terraform module provides DBM/OPSI Landing Zone foundations. |
 
-Start with [[Getting Started]], then [[Configuration]] and [[Fleet Lifecycle]].
+Start with [[Getting Started]], then [[Configuration]], [[Fleet Lifecycle]], and
+[[Scale and Landing Zones]].

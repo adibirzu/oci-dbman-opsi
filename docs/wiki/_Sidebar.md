@@ -2,5 +2,6 @@
 * [[Getting Started]]
 * [[Configuration]]
 * [[Fleet Lifecycle]]
+* [[Scale and Landing Zones]]
 * [[Operations]]
 * [[Security and Release]]

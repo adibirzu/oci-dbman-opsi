@@ -433,6 +433,10 @@ reading the per-target verdict.
 - Public status uses opaque target handles. Topology, OCIDs, service references,
   and ownership records remain in ignored `0600` state.
 
+For the 1-to-1,000 target scale model, the exact operator selections, a visual
+workflow, and the Landing Zone Terraform integration boundary, see
+[Fleet Scale and Landing Zone Integration](docs/scale-and-landing-zones.md).
+
 ## Documentation map
 
 | Start here when you need to… | Document |
@@ -446,6 +450,7 @@ reading the per-target verdict.
 | Run the disposable incident demonstration | [End-to-end demo runbook](docs/demo-db-incident-e2e.md) |
 | Configure the Data Safe audit export bridge | [Data Safe to Log Analytics](docs/datasafe-log-analytics.md) |
 | Review security and publication controls | [Security guide](docs/security.md) |
+| Run one plan from 1 to 1,000 targets or enhance Landing Zone composition | [Fleet scale and Landing Zone integration](docs/scale-and-landing-zones.md) |
 | See implementation and live release gates | [Product portfolio](docs/product/portfolio.md) |
 
 ## Architecture
