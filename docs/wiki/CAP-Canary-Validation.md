@@ -26,6 +26,15 @@ production-readiness claim.
 - An active insight is reused.
 - Log Analytics stays blocked until a Management Agent-backed entity exists.
 
+## Current credential-repair boundary
+
+The database-side user-creation, grants, and login-validation packet completed
+through a short-lived Bastion session. The subsequent DBM reconciliation still
+reached terminal `FAILED_ENABLING`, so the credential is no longer the proven
+blocker. The workflow stopped before OPSI repair; collection remains unproven
+until the OCI DBM prerequisite/work-request diagnostic is resolved and DBM
+reports `ENABLED`.
+
 ## Remaining gate
 
 The protected monitoring-user/Vault alignment must complete before DBM and OPSI

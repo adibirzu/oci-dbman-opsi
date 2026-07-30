@@ -69,17 +69,34 @@ The workflow now:
 5. continues to skip an existing active OPSI insight idempotently;
 6. keeps the Log Analytics phase blocked until a Management Agent-backed entity
    is available.
+7. waits for the locally bound Bastion SSH tunnel to accept connections before
+   transferring a database-side script, resolves an actual Bastion session ID
+   rather than an OCI work-request ID, and reports bounded SSH diagnostics.
 
 These behaviors apply to the expert per-target workflow and are reused by fleet
 orchestration phases. They replace the manual “check the console and retry”
 steps with explicit terminal states and actionable exit failures.
 
+## CAP credential-repair follow-up
+
+The database-side monitoring-user creation, idempotent grants, and login
+validation scripts completed through a short-lived Bastion session. An earlier
+session-key diagnostic exposed and corrected transport handling for tunnel
+readiness and work-request versus session IDs; all temporary sessions were
+deleted. No Bastion allowlist, network rule, endpoint, database, or Log
+Analytics resource was changed by that diagnostic.
+
+The subsequent DBM reconciliation still reached terminal
+`FAILED_ENABLING`. This proves the remaining blocker is in OCI DBM enablement,
+not the database monitoring-user credential path. OPSI repair was not attempted
+after this fail-closed DBM result, and DBM/OPSI collection remains unproven.
+
 ## Remaining live sequence
 
 The next approved canary run is:
 
-1. align the canary monitoring-user password with the current Vault secret
-   through OCI Bastion;
+1. inspect the OCI DBM enablement prerequisite/work-request diagnostics for the
+   terminal failure and correct only the identified dependency;
 2. rerun DBM enablement and require `ENABLED`;
 3. repair the existing OPSI insight and require `ACTIVE` plus a successful
    connection status;

@@ -58,7 +58,19 @@ def _default_exec_bg(argv: list[str]) -> subprocess.Popen:
     # Return the handle so the caller owns the forward's lifecycle and can
     # terminate it when the run ends (the forward runs foreground under Popen;
     # ssh is invoked without -f so it does not self-background and detach).
-    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Preserve the short-lived forward's stderr so a startup failure can be
+    # diagnosed without exposing SQL input or command output.
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def _local_forward_ready(port: int) -> bool:
+    """Return whether the local SSH forward is accepting TCP connections."""
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 class BastionSqlRunner:
@@ -82,7 +94,8 @@ class BastionSqlRunner:
         sleeper: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
         stale_session_age: int | None = None,
-        tunnel_wait: float = 6.0,
+        tunnel_wait: float = 30.0,
+        tunnel_ready: Callable[[int], bool] = _local_forward_ready,
         atexit_register: Callable[[Callable[[], None]], Any] = atexit.register,
         atexit_unregister: Callable[[Callable[[], None]], Any] = atexit.unregister,
     ) -> None:
@@ -104,6 +117,7 @@ class BastionSqlRunner:
         self._now = now
         self.stale_session_age = session_ttl if stale_session_age is None else stale_session_age
         self.tunnel_wait = tunnel_wait
+        self._tunnel_ready = tunnel_ready
         self._atexit_register = atexit_register
         self._atexit_unregister = atexit_unregister
 
@@ -111,7 +125,7 @@ class BastionSqlRunner:
     def __call__(self, target: Target, scripts: list[Path]) -> str:
         display_name = f"dbman-exec-{target.name}".replace(" ", "-").lower()[:60]
         self._reap_stale_sessions()
-        self._exec([
+        created_session = self._exec([
             "oci", "--profile", self.profile, "--region", self.region,
             "bastion", "session", "create-port-forwarding",
             "--bastion-id", self.bastion_id,
@@ -122,8 +136,13 @@ class BastionSqlRunner:
             "--session-ttl", str(self.session_ttl),
             "--wait-for-state", "SUCCEEDED",
             "--max-wait-seconds", "600", "--wait-interval-seconds", "15",
+            "--output", "json",
         ])
-        session_id = self._session_id_fn()
+        session_id = (
+            self._created_session_id(created_session)
+            or self._resolve_session_id_for_display_name(display_name)
+            or self._session_id_fn()
+        )
         # A fresh ephemeral local port per run (unless one is pinned explicitly):
         # a leaked forward from a prior run can never be silently reused, so the
         # password is never piped to a stale host on a fixed port.
@@ -156,9 +175,9 @@ class BastionSqlRunner:
                 "ssh", "-i", self.ssh_key, "-NL",
                 f"{port}:{self.target_private_ip}:22", "-p", "22",
                 f"{session_id}@{self.bastion_host}",
-                "-o", "ExitOnForwardFailure=yes", *ssh_opts,
+                "-o", "IdentitiesOnly=yes", "-o", "ExitOnForwardFailure=yes", *ssh_opts,
             ])
-            self._sleep(self.tunnel_wait)
+            self._wait_for_tunnel(forward, port)
             for script in scripts:
                 if not _SAFE_REMOTE_NAME.match(script.name):
                     raise ValueError(f"unsafe script name for remote execution: {script.name!r}")
@@ -185,6 +204,44 @@ class BastionSqlRunner:
                 except OSError:
                     pass
         return "\n".join(outputs)
+
+    def _wait_for_tunnel(self, forward: Any, port: int) -> None:
+        """Wait until SSH owns the local port before copying a SQL script.
+
+        OCI can mark a Bastion session active before the local SSH client has
+        completed its own handshake.  A fixed sleep occasionally races that
+        handshake and produces a connection-refused SCP failure.  Probe only
+        the loopback listener, bounded by ``tunnel_wait``; no database login or
+        credential is sent while waiting.
+        """
+
+        deadline = self._now() + self.tunnel_wait
+        while True:
+            if self._tunnel_ready(port):
+                return
+            if hasattr(forward, "poll") and forward.poll() is not None:
+                detail = self._forward_failure_detail(forward)
+                raise RuntimeError(
+                    "Bastion SSH forward exited before accepting connections"
+                    + (f": {detail}" if detail else "")
+                )
+            if self._now() >= deadline:
+                raise TimeoutError(
+                    f"Bastion SSH forward did not accept connections within {self.tunnel_wait:g} seconds"
+                )
+            self._sleep(min(1.0, max(0.0, deadline - self._now())))
+
+    @staticmethod
+    def _forward_failure_detail(forward: Any) -> str:
+        """Return a bounded SSH startup diagnostic after the process exits."""
+
+        stream = getattr(forward, "stderr", None)
+        if stream is None:
+            return ""
+        try:
+            return str(stream.read()).strip().replace("\n", " ")[:500]
+        except Exception:  # noqa: BLE001 - diagnostics must not mask teardown
+            return ""
 
     @staticmethod
     def _terminate_forward(forward: Any) -> None:
@@ -292,7 +349,8 @@ class BastionSqlRunner:
             return None
 
     def _resolve_session_id(self) -> str:
-        # Default resolver: list active sessions and return the most recent id.
+        # Compatibility fallback for older CLI output that omits the newly
+        # created session ID.  Normal execution uses _created_session_id above.
         raw = self._exec([
             "oci", "--profile", self.profile, "--region", self.region,
             "bastion", "session", "list", "--bastion-id", self.bastion_id, "--all",
@@ -303,3 +361,40 @@ class BastionSqlRunner:
         if value.startswith('"'):
             value = json.loads(value)
         return value
+
+    def _resolve_session_id_for_display_name(self, display_name: str) -> str | None:
+        """Resolve this runner's active session, excluding unrelated sessions."""
+
+        raw = self._exec([
+            "oci", "--profile", self.profile, "--region", self.region,
+            "bastion", "session", "list", "--bastion-id", self.bastion_id, "--all",
+            "--sort-by", "TIMECREATED", "--sort-order", "DESC",
+            "--query",
+            f'data[?"lifecycle-state"==\'ACTIVE\' && "display-name"==\'{display_name}\']|[0].id',
+            "--raw-output", "--output", "json",
+        ])
+        value = raw.strip()
+        if value in {"", "null"}:
+            return None
+        if value.startswith('"'):
+            value = json.loads(value)
+        return str(value) if value else None
+
+    @staticmethod
+    def _created_session_id(raw: str) -> str | None:
+        """Extract the ID from this runner's create-session response."""
+
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            return None
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        session_id = data.get("id") if isinstance(data, dict) else None
+        # create-port-forwarding returns a Bastion work-request ID; it is not a
+        # valid SSH username.  Accept only an actual session ID if a CLI version
+        # happens to return one.
+        return (
+            str(session_id)
+            if isinstance(session_id, str) and ".bastionsession." in session_id
+            else None
+        )
