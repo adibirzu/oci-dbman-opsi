@@ -37,6 +37,14 @@ class _ListingExec(_FakeExec):
         return "OK"
 
 
+class _CreateResponseExec(_FakeExec):
+    def run(self, argv, input=None):  # noqa: A002 - mirror subprocess signature
+        self.fg.append(argv)
+        if "create-port-forwarding" in " ".join(argv):
+            return '{"data": {"id": "ocid1.bastionsession.oc1.test.created"}}'
+        return "OK"
+
+
 def _runner(ex, **kw):
     return BastionSqlRunner(
         bastion_id="ocid" + "1.bastion.x",
@@ -48,6 +56,7 @@ def _runner(ex, **kw):
         exec_bg_fn=ex.run_bg,
         session_id_fn=lambda: "ocid" + "1.bastionsession.x",
         sleeper=lambda d: None,
+        tunnel_ready=lambda port: True,
         local_port=8022,
         **kw,
     )
@@ -181,6 +190,7 @@ def test_forward_process_is_terminated_in_finally(tmp_path: Path) -> None:
         exec_bg_fn=run_bg,
         session_id_fn=lambda: "s",
         sleeper=lambda d: None,
+        tunnel_ready=lambda port: True,
     )(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
 
     assert handle.terminated == 1
@@ -196,6 +206,51 @@ def test_forward_drops_dash_f_so_caller_owns_the_process(tmp_path: Path) -> None
     forward = ex.bg[0]
     assert "-fNL" not in forward and "-f" not in forward  # not self-backgrounded
     assert "-NL" in forward  # Popen owns the foreground forward
+
+
+def test_runner_waits_until_the_local_forward_accepts_connections(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"
+    s1.write_text("-- a")
+    ex = _FakeExec()
+    clock = [0.0]
+    readiness = [False, False, True]
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1", local_port=8022,
+        exec_fn=ex.run, exec_bg_fn=ex.run_bg, session_id_fn=lambda: "s",
+        sleeper=sleep, now=lambda: clock[0], tunnel_wait=5,
+        tunnel_ready=lambda port: readiness.pop(0),
+    )
+
+    runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    assert clock[0] == 2.0
+    assert any(command[0] == "scp" for command in ex.fg)
+
+
+def test_runner_times_out_when_the_local_forward_never_listens(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"
+    s1.write_text("-- a")
+    ex = _FakeExec()
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1", local_port=8022,
+        exec_fn=ex.run, exec_bg_fn=ex.run_bg, session_id_fn=lambda: "s",
+        sleeper=sleep, now=lambda: clock[0], tunnel_wait=2,
+        tunnel_ready=lambda port: False,
+    )
+
+    with pytest.raises(TimeoutError, match="did not accept connections"):
+        runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
 
 
 def test_ephemeral_local_port_when_unset(tmp_path: Path) -> None:
@@ -215,6 +270,7 @@ def test_ephemeral_local_port_when_unset(tmp_path: Path) -> None:
         exec_bg_fn=ex.run_bg,
         session_id_fn=lambda: "s",
         sleeper=lambda d: None,
+        tunnel_ready=lambda port: True,
     )
 
     runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
@@ -286,6 +342,53 @@ def test_resolve_session_id_parses_quoted_and_plain() -> None:
         sleeper=lambda d: None,
     )
     assert runner2._resolve_session_id() == "ocid" + "1.bastionsession.plain"
+
+
+def test_runner_uses_id_returned_by_its_create_request(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"
+    s1.write_text("-- a")
+    ex = _CreateResponseExec()
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1", local_port=8022,
+        exec_fn=ex.run, exec_bg_fn=ex.run_bg,
+        session_id_fn=lambda: "fallback-session", sleeper=lambda d: None,
+        tunnel_ready=lambda port: True,
+    )
+
+    runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    commands = [" ".join(command) for command in ex.fg]
+    assert any("--session-id ocid1.bastionsession.oc1.test.created" in command for command in commands)
+    assert not any("--session-id fallback-session" in command for command in commands)
+
+
+def test_runner_rejects_work_request_id_from_create_response(tmp_path: Path) -> None:
+    s1 = tmp_path / "01.sql"
+    s1.write_text("-- a")
+    ex = _FakeExec()
+
+    def create_or_list(argv, input=None):  # noqa: A002
+        ex.fg.append(argv)
+        joined = " ".join(argv)
+        if "create-port-forwarding" in joined:
+            return '{"data": {"id": "ocid1.bastionworkrequest.oc1.test.created"}}'
+        if "session list" in joined:
+            return "null"
+        return "OK"
+
+    runner = BastionSqlRunner(
+        bastion_id="b", target_private_ip="10.0.0.5", ssh_key="/k",
+        profile="cap", region="eu-frankfurt-1", local_port=8022,
+        exec_fn=create_or_list, exec_bg_fn=ex.run_bg,
+        session_id_fn=lambda: "fallback-session", sleeper=lambda d: None,
+        tunnel_ready=lambda port: True,
+    )
+
+    runner(Target(kind="dbcs", name="cdb", service_name="PDB1"), [s1])
+
+    commands = [" ".join(command) for command in ex.fg]
+    assert any("--session-id fallback-session" in command for command in commands)
 
 
 def test_teardown_is_best_effort_on_delete_failure() -> None:
