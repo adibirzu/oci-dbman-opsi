@@ -9,8 +9,10 @@ The tool is production-oriented: it separates discovery from writes, requires
 an exact reviewed plan before fleet changes, records checkpointed state, and
 does not treat registration as proof of collection. It is not an Oracle
 product or a substitute for an approved change process. The current repository
-has local automated verification; its live scratch-tenancy acceptance matrix
-remains open until an owner supplies current redacted evidence.
+has local automated verification and a partial live CAP Base Database receipt.
+DBM/OPSI collection and Log Analytics ingestion remain open until the protected
+credential repair and collector workflow complete. See
+[CAP Base Database canary validation](cap-canary-validation.md).
 
 ## What It Does
 
@@ -335,3 +337,9 @@ approved scope, identity/policies, collection timestamps/proofs, DB/host
 handoffs, cleanup inventory, and any target-family acceptance run. See the
 [fleet lifecycle runbook](fleet-lifecycle-runbook.md) for the acceptance matrix
 and the [security guide](security.md) for publication controls.
+
+The CAP canary also established a fail-closed runtime contract: DBM
+`FAILED_*` and a bounded `ENABLING` timeout fail the command, a reconciled DBM
+connection is rechecked, and a failed OPSI insight is repaired in place rather
+than recreated. These checks prevent an exit-zero submission from being
+misreported as successful enablement.
