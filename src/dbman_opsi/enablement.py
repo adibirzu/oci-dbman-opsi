@@ -11,7 +11,13 @@ from dbman_opsi.status import dbm_status
 
 log = logging.getLogger(__name__)
 
-CLOUD_REQUIRED_FIELDS = ("resource_id", "password_secret_id", "private_endpoint_id", "service_name", "monitoring_user")
+CLOUD_REQUIRED_FIELDS = (
+    "resource_id",
+    "password_secret_id",
+    "private_endpoint_id",
+    "service_name",
+    "monitoring_user",
+)
 
 
 def missing_cloud_fields(target: Target) -> list[str]:
@@ -82,23 +88,41 @@ def cloud_modify_command(target: Target) -> list[str]:
 
     wait = ["--wait-for-state", "AVAILABLE", "--max-wait-seconds", "900"]
     conn = [
-        "--service-name", target.service_name or "",
-        "--password-secret-id", target.password_secret_id or "",
-        "--private-end-point-id", target.private_endpoint_id or "",
-        "--user-name", target.monitoring_user or "",
-        "--role", "NORMAL", "--protocol", "TCP", "--port", "1521",
+        "--service-name",
+        target.service_name or "",
+        "--password-secret-id",
+        target.password_secret_id or "",
+        "--private-end-point-id",
+        target.private_endpoint_id or "",
+        "--user-name",
+        target.monitoring_user or "",
+        "--role",
+        "NORMAL",
+        "--protocol",
+        "TCP",
+        "--port",
+        "1521",
     ]
     if target.database_role == "PDB":
         return [
-            "db", "pluggable-database", "modify-pluggable-database-management",
-            "--pluggable-database-id", target.resource_id or "",
-            *conn, *wait,
+            "db",
+            "pluggable-database",
+            "modify-pluggable-database-management",
+            "--pluggable-database-id",
+            target.resource_id or "",
+            *conn,
+            *wait,
         ]
     return [
-        "db", "database", "modify-database-management",
-        "--database-id", target.resource_id or "",
-        "--management-type", target.management_type,
-        *conn, *wait,
+        "db",
+        "database",
+        "modify-database-management",
+        "--database-id",
+        target.resource_id or "",
+        "--management-type",
+        target.management_type,
+        *conn,
+        *wait,
     ]
 
 
@@ -131,7 +155,9 @@ class EnablementService:
         self.dbm_wait_attempts = 20
         self.dbm_wait_delay = 15.0
 
-    def enable_all(self, config: EnablementConfig, force_reconcile: bool = False) -> None:
+    def enable_all(
+        self, config: EnablementConfig, force_reconcile: bool = False
+    ) -> None:
         for target in config.targets:
             self.enable_target(target, force_reconcile=force_reconcile)
 
@@ -148,7 +174,9 @@ class EnablementService:
         if target.kind == "autonomous":
             return self._enable_autonomous(target, enable_opsi=False)
         if target.kind in {"dbcs", "exadata"}:
-            return self._enable_cloud_database(target, force_reconcile=force_reconcile, enable_opsi=False)
+            return self._enable_cloud_database(
+                target, force_reconcile=force_reconcile, enable_opsi=False
+            )
         if target.kind in {"external-db", "external-exadata"}:
             self._print_external_next_step(target)
             return False
@@ -157,22 +185,37 @@ class EnablementService:
     def enable_opsi(self, target: Target) -> bool:
         if target.kind == "autonomous":
             if target.opsi_database_insight_id:
-                return self.oci.run_tolerating([
-                    "opsi", "database-insights", "enable-autonomous-database",
-                    "--database-insight-id", target.opsi_database_insight_id,
-                    "--is-advanced-features-enabled", "false",
-                    "--wait-for-state", "SUCCEEDED",
-                ], tolerated=self.OPSI_ALREADY_ENABLED_MARKERS)
+                return self.oci.run_tolerating(
+                    [
+                        "opsi",
+                        "database-insights",
+                        "enable-autonomous-database",
+                        "--database-insight-id",
+                        target.opsi_database_insight_id,
+                        "--is-advanced-features-enabled",
+                        "false",
+                        "--wait-for-state",
+                        "SUCCEEDED",
+                    ],
+                    tolerated=self.OPSI_ALREADY_ENABLED_MARKERS,
+                )
             if not target.resource_id:
                 raise ValueError(f"Target {target.name} is missing resource_id")
             # The Database service owns the basic Autonomous OPSI lifecycle and
             # creates the Database Insight when one does not exist. This avoids
             # requiring an insight OCID before the enable operation that creates it.
-            return self.oci.run_tolerating([
-                "db", "autonomous-database", "enable-operations-insights",
-                "--autonomous-database-id", target.resource_id,
-                "--wait-for-state", "SUCCEEDED",
-            ], tolerated=self.OPSI_ALREADY_ENABLED_MARKERS)
+            return self.oci.run_tolerating(
+                [
+                    "db",
+                    "autonomous-database",
+                    "enable-operations-insights",
+                    "--autonomous-database-id",
+                    target.resource_id,
+                    "--wait-for-state",
+                    "SUCCEEDED",
+                ],
+                tolerated=self.OPSI_ALREADY_ENABLED_MARKERS,
+            )
         if target.kind not in {"dbcs", "exadata"}:
             return False
         return self._enable_opsi_pe_comanaged_if_ready(target)
@@ -180,13 +223,16 @@ class EnablementService:
     def _enable_autonomous(self, target: Target, *, enable_opsi: bool = True) -> bool:
         if not target.resource_id:
             raise ValueError(f"Target {target.name} is missing resource_id")
-        applied = self.oci.run_tolerating([
-            "db",
-            "autonomous-database",
-            "enable-autonomous-database-management",
-            "--autonomous-database-id",
-            target.resource_id,
-        ], tolerated=self.DBM_ALREADY_ENABLED_MARKERS)
+        applied = self.oci.run_tolerating(
+            [
+                "db",
+                "autonomous-database",
+                "enable-autonomous-database-management",
+                "--autonomous-database-id",
+                target.resource_id,
+            ],
+            tolerated=self.DBM_ALREADY_ENABLED_MARKERS,
+        )
         if enable_opsi:
             self.enable_opsi(target)
         return applied
@@ -201,10 +247,14 @@ class EnablementService:
         "operations insights is enabled",
     )
 
-    def _enable_cloud_database(self, target: Target, force_reconcile: bool = False, *, enable_opsi: bool = True) -> bool:
+    def _enable_cloud_database(
+        self, target: Target, force_reconcile: bool = False, *, enable_opsi: bool = True
+    ) -> bool:
         missing = missing_cloud_fields(target)
         if missing:
-            raise ValueError(f"Target {target.name} is missing required fields: {', '.join(missing)}")
+            raise ValueError(
+                f"Target {target.name} is missing required fields: {', '.join(missing)}"
+            )
         applied = self.oci.run_tolerating(
             cloud_enable_command(target), tolerated=self.DBM_ALREADY_ENABLED_MARKERS
         )
@@ -218,8 +268,12 @@ class EnablementService:
                     target.name,
                 )
             else:
-                log.info("Database Management already enabled for %s; reconciling connection", target.name)
+                log.info(
+                    "Database Management already enabled for %s; reconciling connection",
+                    target.name,
+                )
                 self.oci.run(cloud_modify_command(target))
+                self._wait_dbm_enabled(target)
         elif applied:
             # Freshly enabled: wait until DBM reports ENABLED (managed database
             # registered) before attaching Ops Insights, to avoid the propagation
@@ -246,7 +300,13 @@ class EnablementService:
                     details = self.oci.get_database(target.resource_id)
             except (RuntimeError, AttributeError):
                 return
-            status = str(dbm_status(details, target.kind, target.database_role) or "").upper()
+            status = str(
+                dbm_status(details, target.kind, target.database_role) or ""
+            ).upper()
+            if status.startswith("FAILED"):
+                raise RuntimeError(
+                    f"Database Management enablement for {target.name} reached terminal status {status}"
+                )
             # Done once strictly ENABLED (the managed database is registered).
             # Only keep waiting while it is actively ENABLING; any other/unknown
             # status returns immediately (best-effort — the OPSI create retry is
@@ -255,6 +315,10 @@ class EnablementService:
                 return
             if attempt < self.dbm_wait_attempts - 1:
                 self._sleep(self.dbm_wait_delay)
+        raise TimeoutError(
+            f"Database Management enablement for {target.name} remained ENABLING "
+            f"after {self.dbm_wait_attempts} status checks"
+        )
 
     def _dbm_monitoring_healthy(self, target: Target) -> bool:
         """True when the managed database reports an UP monitoring status.
@@ -282,13 +346,26 @@ class EnablementService:
             if not value
         ]
         if shared_missing:
-            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(shared_missing))
+            log.info(
+                "Skipping Ops Insights for %s; missing: %s",
+                target.name,
+                ", ".join(shared_missing),
+            )
             return False
-        if self._opsi_insight_active(target):
+        existing_insight = self._find_opsi_insight(target)
+        lifecycle_state = str(
+            (existing_insight or {}).get("lifecycle-state") or ""
+        ).upper()
+        if lifecycle_state == "ACTIVE":
             # Idempotent: an ACTIVE insight already collects, so do not re-create
             # (create-pe-comanaged on an existing insight conflicts / hangs).
-            log.info("Ops Insights insight already ACTIVE for %s; skipping create", target.name)
+            log.info(
+                "Ops Insights insight already ACTIVE for %s; skipping create",
+                target.name,
+            )
             return False
+        if lifecycle_state in {"FAILED", "NEEDS_ATTENTION"}:
+            return self._repair_opsi_insight(target, existing_insight or {})
         if not target.opsi_database_insight_id:
             return self._create_opsi_pe_comanaged(target)
         args = [
@@ -307,16 +384,27 @@ class EnablementService:
             target.opsi_database_insight_id or "",
         ]
         if target.opsi_connection_details_file:
-            args.extend(["--connection-details", f"file://{target.opsi_connection_details_file}"])
+            args.extend(
+                [
+                    "--connection-details",
+                    f"file://{target.opsi_connection_details_file}",
+                ]
+            )
         self.oci.run(args)
         return True
 
     def _opsi_insight_active(self, target: Target) -> bool:
         """True when an ACTIVE OPSI insight already exists for this database."""
 
+        detail = self._find_opsi_insight(target)
+        return str((detail or {}).get("lifecycle-state") or "").upper() == "ACTIVE"
+
+    def _find_opsi_insight(self, target: Target) -> dict:
+        """Return an existing insight for the target, preferring ACTIVE state."""
+
         compartment = target.compartment_id or ""
         if not compartment or not target.resource_id:
-            return False
+            return {}
         # Fast path: when the insight OCID is known, read it with the reliable
         # single-resource GET instead of the flaky list — no false "inactive"
         # from a partial list that dropped the insight.
@@ -328,7 +416,7 @@ class EnablementService:
                 except RuntimeError:
                     detail = {}
                 if detail:
-                    return detail.get("lifecycle-state") == "ACTIVE"
+                    return detail
         # The opsi list endpoint flaps: it returns NotAuthorizedOrNotFound *or*
         # an exit-0 empty list even when insights exist. Both are inconclusive,
         # so retry on either. An empty result that falls through to create is
@@ -336,19 +424,85 @@ class EnablementService:
         # detect the existing ACTIVE insight and skip the create round-trip.
         for _ in range(3):
             try:
-                insights = self.oci.list_opsi_database_insights(compartment)
+                complete_getter = getattr(
+                    self.oci, "list_opsi_database_insights_complete", None
+                )
+                if complete_getter is not None:
+                    insights, _complete = complete_getter(compartment)
+                else:
+                    insights = self.oci.list_opsi_database_insights(compartment)
             except AttributeError:
-                return False
+                return {}
             except RuntimeError:
                 continue
             if not insights:
                 continue
-            return any(
-                insight.get("database-id") == target.resource_id
-                and insight.get("lifecycle-state") == "ACTIVE"
+            matches = [
+                insight
                 for insight in insights
+                if insight.get("database-id") == target.resource_id
+            ]
+            if matches:
+                return next(
+                    (
+                        insight
+                        for insight in matches
+                        if str(insight.get("lifecycle-state") or "").upper() == "ACTIVE"
+                    ),
+                    matches[0],
+                )
+        return {}
+
+    def _repair_opsi_insight(self, target: Target, insight: dict) -> bool:
+        insight_id = str(insight.get("id") or target.opsi_database_insight_id or "")
+        missing = [
+            name
+            for name, value in {
+                "opsi_database_insight_id": insight_id,
+                "password_secret_id": target.password_secret_id,
+                "monitoring_user": target.monitoring_user,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"Target {target.name} cannot repair its existing failed Ops Insights insight; "
+                f"missing: {', '.join(missing)}"
             )
-        return False
+        args = [
+            "opsi",
+            "database-insights",
+            "change-pe-comanaged-database-detail",
+            "--database-insight-id",
+            insight_id,
+            "--service-name",
+            target.service_name or "",
+            "--opsi-private-endpoint-id",
+            target.opsi_private_endpoint_id or "",
+            "--credential-details-credential-source-name",
+            target.name,
+            "--credential-details-user-name",
+            target.monitoring_user or "",
+            "--credential-details-password-secret-id",
+            target.password_secret_id or "",
+            "--credential-details-role",
+            "NORMAL",
+            "--wait-for-state",
+            "SUCCEEDED",
+            "--max-wait-seconds",
+            "1200",
+            "--wait-interval-seconds",
+            "30",
+        ]
+        if target.opsi_connection_details_file:
+            args.extend(
+                [
+                    "--connection-details",
+                    f"file://{target.opsi_connection_details_file}",
+                ]
+            )
+        self.oci.run(args)
+        return True
 
     def _create_opsi_pe_comanaged(self, target: Target) -> bool:
         missing = [
@@ -362,7 +516,11 @@ class EnablementService:
             if not value
         ]
         if missing:
-            log.info("Skipping Ops Insights for %s; missing: %s", target.name, ", ".join(missing))
+            log.info(
+                "Skipping Ops Insights for %s; missing: %s",
+                target.name,
+                ", ".join(missing),
+            )
             return False
         args = [
             "opsi",
@@ -390,7 +548,12 @@ class EnablementService:
             "30",
         ]
         if target.opsi_connection_details_file:
-            args.extend(["--connection-details", f"file://{target.opsi_connection_details_file}"])
+            args.extend(
+                [
+                    "--connection-details",
+                    f"file://{target.opsi_connection_details_file}",
+                ]
+            )
         # Tolerate a 409 "already exists" so a flaky active-check that fell through
         # does not fail the run when the insight is in fact present. Retry on the
         # post-enable propagation race ("database resource details were missing"):
@@ -400,10 +563,15 @@ class EnablementService:
             try:
                 created = self.oci.run_tolerating(args, tolerated=("already exists",))
                 if not created:
-                    log.info("Ops Insights insight already exists for %s; left as-is", target.name)
+                    log.info(
+                        "Ops Insights insight already exists for %s; left as-is",
+                        target.name,
+                    )
                 return created
             except RuntimeError as exc:
-                is_propagation = any(marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS)
+                is_propagation = any(
+                    marker in str(exc) for marker in OPSI_PROPAGATION_MARKERS
+                )
                 if is_propagation and attempt < self.opsi_create_attempts - 1:
                     log.info(
                         "Ops Insights not ready for %s (database registering); retry %s/%s",
@@ -416,4 +584,7 @@ class EnablementService:
                 raise
 
     def _print_external_next_step(self, target: Target) -> None:
-        log.info("External target %s: run generated Management Agent script, then rerun validate.", target.name)
+        log.info(
+            "External target %s: run generated Management Agent script, then rerun validate.",
+            target.name,
+        )

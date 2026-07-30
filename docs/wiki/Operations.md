@@ -6,12 +6,17 @@
   credentials for advanced diagnostics are Vault-backed.
 - **OPSI:** Insight registration is not collection proof. Use `validate`,
   `process-insights`, and generated diagnostics to find credential, private
-  endpoint, network, or agent gaps.
+  endpoint, network, or agent gaps. An existing `FAILED` or
+  `NEEDS_ATTENTION` private-endpoint co-managed insight is repaired in place;
+  an `ACTIVE` insight is reused.
 - **Data Safe:** Target registration, audit profile/trail setup, and delivered
   audit events are distinct milestones.
 - **Log Analytics:** DBCS/Base DB requires a Management Agent-backed collector;
   ADB requires an approved private collector, wallet, and credential registration
   outside Terraform state. Default logs are alert, listener, and audit.
+
+DBM enablement fails closed when OCI reports `FAILED_*` or remains `ENABLING`
+beyond the bounded poll window. Submission success alone is not readiness.
 
 ## Useful commands
 

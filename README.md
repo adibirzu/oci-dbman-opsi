@@ -43,6 +43,11 @@ It explains the workflow in plain language: **1,000 databases is a tested
 planning example, not a hard product limit; fleets can have more than 1,000
 planned targets**.
 
+For the current sanitized Base Database live-test result, including the exact
+failure boundary, dependency inventory, automation changes, and remaining
+DBM/OPSI/Log Analytics acceptance steps, see
+[CAP Base Database canary validation](docs/cap-canary-validation.md).
+
 ## Scale in plain language
 
 Think of `dbman-opsi` as one checked, approved to-do list for your databases.

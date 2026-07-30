@@ -33,4 +33,5 @@ registration, or a `configured` result is not proof that collection is ready.
 | Scale and Landing Zones | The same immutable-plan workflow is locally acceptance-covered at 1, 100, and 1,000 targets; a dedicated Terraform module provides DBM/OPSI Landing Zone foundations. |
 
 Start with [[Getting Started]], then [[Configuration]], [[Fleet Lifecycle]], and
-[[Scale and Landing Zones]].
+[[Scale and Landing Zones]]. The current live boundary is recorded in
+[[CAP Canary Validation]].

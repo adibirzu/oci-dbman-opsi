@@ -4,4 +4,5 @@
 * [[Fleet Lifecycle]]
 * [[Scale and Landing Zones]]
 * [[Operations]]
+* [[CAP Canary Validation]]
 * [[Security and Release]]

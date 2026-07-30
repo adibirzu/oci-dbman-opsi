@@ -229,9 +229,17 @@ handoff instead of being omitted. Reused and preexisting resources remain. A
 repeated completed offboard is a no-op. Retain sanitized action metadata for seven
 days; do not retain secret values, OCIDs, endpoints, or topology in public evidence.
 
-## Scratch-tenancy acceptance matrix (not yet executed)
+## Scratch-tenancy acceptance matrix
 
-All rows below are **IN PROGRESS / OWNER INPUT REQUIRED**. Before execution, the
+A sanitized CAP Base Database canary has been partially executed. Discovery,
+dependency inventory, existing-endpoint reuse, DBM/OPSI submission, and
+credential-failure diagnosis were observed live. DBM/OPSI collection, Management
+Agent installation, Log Analytics ingestion, idempotent rerun, and cleanup
+remain open. The detailed receipt is
+[CAP Base Database canary validation](cap-canary-validation.md).
+
+All rows below remain **IN PROGRESS / OWNER INPUT REQUIRED** until their complete
+exit conditions are met. Before execution, the
 release owner must supply: approved scratch tenancy/compartment and region, target
 family access, an approved OCI auth mode, least-privilege policies, Vault references
 and DBA/host-admin access where applicable, a change window, and a redaction-safe
