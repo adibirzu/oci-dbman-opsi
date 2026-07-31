@@ -91,12 +91,20 @@ The subsequent DBM reconciliation still reached terminal
 not the database monitoring-user credential path. OPSI repair was not attempted
 after this fail-closed DBM result, and DBM/OPSI collection remains unproven.
 
+Read-only OCI diagnostics confirm active private endpoints, Service Gateway
+routing, listener-port security-list rules, Vault reference, and service
+principal policies. OCI did not expose a failed DBM work-request record for this
+operation. The remaining unverified prerequisite is therefore host OS firewall
+reachability from the DBM/OPSI private-endpoint source to the database listener;
+the generated host-firewall check must be run before another enablement retry.
+
 ## Remaining live sequence
 
 The next approved canary run is:
 
-1. inspect the OCI DBM enablement prerequisite/work-request diagnostics for the
-   terminal failure and correct only the identified dependency;
+1. run the generated read-only host-firewall check on the database node and
+   permit only the DBM/OPSI private-endpoint source CIDR if it identifies a
+   listener-port block;
 2. rerun DBM enablement and require `ENABLED`;
 3. repair the existing OPSI insight and require `ACTIVE` plus a successful
    connection status;
