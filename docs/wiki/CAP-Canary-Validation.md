@@ -35,6 +35,10 @@ blocker. The workflow stopped before OPSI repair; collection remains unproven
 until the OCI DBM prerequisite/work-request diagnostic is resolved and DBM
 reports `ENABLED`.
 
+OCI-side network, endpoint, Vault, and IAM checks pass, while no failed DBM
+work-request record is available. The next gate is a read-only host OS firewall
+check for listener reachability from the DBM/OPSI private-endpoint source.
+
 ## Remaining gate
 
 The protected monitoring-user/Vault alignment must complete before DBM and OPSI
